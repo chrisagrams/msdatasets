@@ -7,6 +7,10 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mscompress.datasets.torch import MSCompressDataset
 
 import httpx
 from mstransfer.client import download_batch, download_file
@@ -178,7 +182,7 @@ class _RichBatchProgress:
             )
 
 
-def load_dataset(
+def download_dataset(
     dataset_id: str,
     *,
     force_download: bool = False,
@@ -198,7 +202,7 @@ def load_dataset(
     max_workers:
         Maximum number of parallel downloads.
     """
-    log.info("Loading dataset %s", dataset_id)
+    log.info("Downloading dataset %s", dataset_id)
     dataset_dir = get_dataset_dir(dataset_id)
     dataset_dir.mkdir(parents=True, exist_ok=True)
     log.debug("Dataset directory: %s", dataset_dir)
@@ -305,6 +309,41 @@ def load_dataset(
     )
     log.info("Dataset ready: %d file(s) in %s", len(ds), dataset_dir)
     return ds
+
+
+def load_dataset(
+    dataset_id: str,
+    *,
+    force_download: bool = False,
+    show_progress: bool = True,
+    max_workers: int = 4,
+) -> MSCompressDataset:
+    """Download a dataset and return an :class:`MSCompressDataset`.
+
+    Convenience wrapper around :func:`download_dataset` that loads the
+    downloaded files into an :class:`mscompress.datasets.torch.MSCompressDataset`
+    ready for iteration.  Requires PyTorch to be installed.
+
+    Parameters
+    ----------
+    dataset_id:
+        Server-side dataset identifier (UUID).
+    force_download:
+        Re-download parts even if they already exist on disk.
+    show_progress:
+        Show a ``rich`` progress bar during download.
+    max_workers:
+        Maximum number of parallel downloads.
+    """
+    from mscompress.datasets.torch import MSCompressDataset
+
+    ds = download_dataset(
+        dataset_id,
+        force_download=force_download,
+        show_progress=show_progress,
+        max_workers=max_workers,
+    )
+    return MSCompressDataset(ds.cache_dir)
 
 
 class _NullContext:

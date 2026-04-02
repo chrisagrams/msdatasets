@@ -1,5 +1,7 @@
 """Tests for msdatasets.download."""
 
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from msdatasets.download import (
     _ensure_extracted,
     _poll_task,
+    download_dataset,
     download_part,
     fetch_manifest,
     load_dataset,
@@ -337,8 +340,8 @@ class TestDownloadPart:
         assert dest_dir.exists()
 
 
-class TestLoadDataset:
-    """Tests for the load_dataset function."""
+class TestDownloadDataset:
+    """Tests for the download_dataset function."""
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
@@ -358,7 +361,7 @@ class TestLoadDataset:
             ds_dir / "sample_02.mszx",
         ]
 
-        ds = load_dataset("550e8400", show_progress=False)
+        ds = download_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
         assert ds.dataset_name == "Test Dataset"
@@ -392,7 +395,7 @@ class TestLoadDataset:
 
         mock_batch.return_value = [ds_dir / "sample_02.mszx"]
 
-        ds = load_dataset("550e8400", show_progress=False)
+        ds = download_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
         # Only the missing part should trigger extraction and download
@@ -423,7 +426,7 @@ class TestLoadDataset:
             ds_dir / "sample_02.mszx",
         ]
 
-        ds = load_dataset("550e8400", force_download=True, show_progress=False)
+        ds = download_dataset("550e8400", force_download=True, show_progress=False)
 
         assert len(ds) == 2
         # Both parts should be extracted and requested despite one existing
@@ -448,7 +451,7 @@ class TestLoadDataset:
         (ds_dir / "sample_01.mszx").write_bytes(b"existing")
         (ds_dir / "sample_02.mszx").write_bytes(b"existing")
 
-        ds = load_dataset("550e8400", show_progress=False)
+        ds = download_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
         mock_batch.assert_not_called()
@@ -470,7 +473,7 @@ class TestLoadDataset:
             ds_dir / "sample_02.mszx",
         ]
 
-        load_dataset("550e8400", show_progress=False)
+        download_dataset("550e8400", show_progress=False)
 
         manifest_file = ds_dir / "manifest.json"
         assert manifest_file.exists()
@@ -481,3 +484,34 @@ class TestLoadDataset:
         assert saved["total_parts"] == 2
         assert saved["parts"][0]["extract_url"] == "/datasets/550e8400/parts/aaa"
         assert saved["parts"][0]["download_url"] == "/transfer/files/aaa.mszx"
+
+
+class TestLoadDataset:
+    """Tests for the load_dataset function (returns MSCompressDataset)."""
+
+    @patch("msdatasets.download.download_dataset")
+    def test_returns_mscompress_dataset(self, mock_download):
+        mock_ds = MagicMock()
+        mock_ds.cache_dir = "/tmp/ds"
+        mock_download.return_value = mock_ds
+
+        mock_msc_cls = MagicMock()
+        sentinel = MagicMock()
+        mock_msc_cls.return_value = sentinel
+
+        fake_module = ModuleType("mscompress.datasets.torch")
+        fake_module.MSCompressDataset = mock_msc_cls
+
+        with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
+            result = load_dataset(
+                "abc-123", force_download=True, show_progress=False
+            )
+
+        mock_download.assert_called_once_with(
+            "abc-123",
+            force_download=True,
+            show_progress=False,
+            max_workers=4,
+        )
+        mock_msc_cls.assert_called_once_with("/tmp/ds")
+        assert result is sentinel

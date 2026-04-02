@@ -29,7 +29,7 @@ class TestDownloadCommand:
     Tests for the download command.
     """
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_success(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -44,7 +44,7 @@ class TestDownloadCommand:
             "abc", force_download=False, show_progress=True, max_workers=4
         )
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_force_flag(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -58,7 +58,7 @@ class TestDownloadCommand:
             "abc", force_download=True, show_progress=True, max_workers=4
         )
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_no_progress_flag(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -72,21 +72,21 @@ class TestDownloadCommand:
             "abc", force_download=False, show_progress=False, max_workers=4
         )
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_not_found_returns_1(self, mock_load):
         mock_load.side_effect = DatasetNotFoundError("not found")
 
         result = main(["download", "bad-id"])
         assert result == 1
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_download_error_returns_1(self, mock_load):
         mock_load.side_effect = DownloadError("server error")
 
         result = main(["download", "some-id"])
         assert result == 1
 
-    @patch("msdatasets.download.load_dataset")
+    @patch("msdatasets.download.download_dataset")
     def test_fallback_to_dataset_id_when_no_name(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc-123",

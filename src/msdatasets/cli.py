@@ -80,13 +80,13 @@ def _cmd_download(args: argparse.Namespace) -> int:
     """Handle the ``download`` subcommand."""
     from rich.console import Console
 
-    from msdatasets.download import load_dataset
+    from msdatasets.download import download_dataset
     from msdatasets.exceptions import DatasetNotFoundError, DownloadError
 
     console = Console(stderr=True)
 
     try:
-        ds = load_dataset(
+        ds = download_dataset(
             args.dataset_id,
             force_download=args.force,
             show_progress=not args.no_progress,
