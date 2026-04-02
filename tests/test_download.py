@@ -4,8 +4,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from msdatasets.download import download_part, fetch_manifest, load_dataset
-from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+from msdatasets.download import (
+    _ensure_extracted,
+    _poll_task,
+    download_part,
+    fetch_manifest,
+    load_dataset,
+)
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
 from msdatasets.models import Dataset, DatasetPart, Manifest
 
 # Sample manifest dictionary for testing
@@ -19,23 +25,37 @@ SAMPLE_MANIFEST_DICT = {
             "item_id": "aaa",
             "filename": "sample_01.mszx",
             "num_indices": 100,
-            "download_url": "/datasets/550e8400/parts/aaa",
+            "extract_url": "/datasets/550e8400/parts/aaa",
+            "download_url": "/transfer/files/aaa.mszx",
         },
         {
             "part_index": 1,
             "item_id": "bbb",
             "filename": "sample_02.mszx",
             "num_indices": 200,
-            "download_url": "/datasets/550e8400/parts/bbb",
+            "extract_url": "/datasets/550e8400/parts/bbb",
+            "download_url": "/transfer/files/bbb.mszx",
         },
     ],
 }
 
 
+def _make_part(**overrides):
+    """Create a DatasetPart with sensible defaults."""
+    defaults = {
+        "part_index": 0,
+        "item_id": "aaa",
+        "filename": "test.mszx",
+        "num_indices": 10,
+        "extract_url": "/datasets/x/parts/aaa",
+        "download_url": "/transfer/files/aaa.mszx",
+    }
+    defaults.update(overrides)
+    return DatasetPart(**defaults)
+
+
 class TestManifest:
-    """
-    Tests for the Manifest model.
-    """
+    """Tests for the Manifest model."""
 
     def test_from_dict(self):
         m = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
@@ -57,12 +77,12 @@ class TestManifest:
         assert p.item_id == "aaa"
         assert p.filename == "sample_01.mszx"
         assert p.num_indices == 100
+        assert p.extract_url == "/datasets/550e8400/parts/aaa"
+        assert p.download_url == "/transfer/files/aaa.mszx"
 
 
 class TestDataset:
-    """
-    Tests for the Dataset model.
-    """
+    """Tests for the Dataset model."""
 
     def test_len(self, tmp_path):
         ds = Dataset(
@@ -95,9 +115,7 @@ class TestDataset:
 
 
 class TestFetchManifest:
-    """
-    Tests for the fetch_manifest function.
-    """
+    """Tests for the fetch_manifest function."""
 
     def test_success(self):
         mock_response = MagicMock()
@@ -132,105 +150,203 @@ class TestFetchManifest:
             fetch_manifest("some-id", client=mock_client)
 
 
-class TestDownloadPart:
-    """
-    Tests for the download_part function.
-    """
+class TestPollTask:
+    """Tests for _poll_task."""
+
+    def test_complete_immediately(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"task_id": "t1", "state": "complete"}
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        _poll_task(mock_client, "t1")  # Should return without error
+
+    def test_failed_raises_extraction_error(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "task_id": "t1",
+            "state": "failed",
+            "error": "out of memory",
+        }
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(ExtractionError, match="out of memory"):
+            _poll_task(mock_client, "t1")
+
+    @patch("msdatasets.download.time.sleep")
+    def test_polls_until_complete(self, mock_sleep):
+        processing = MagicMock()
+        processing.status_code = 200
+        processing.json.return_value = {"task_id": "t1", "state": "processing"}
+
+        complete = MagicMock()
+        complete.status_code = 200
+        complete.json.return_value = {"task_id": "t1", "state": "complete"}
+
+        mock_client = MagicMock()
+        mock_client.get.side_effect = [processing, processing, complete]
+
+        _poll_task(mock_client, "t1")
+
+        assert mock_client.get.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    def test_server_error_raises(self):
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        with pytest.raises(DownloadError, match="500"):
+            _poll_task(mock_client, "t1")
+
+
+class TestEnsureExtracted:
+    """Tests for _ensure_extracted."""
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download.download_file")
-    def test_downloads_file(self, mock_dl_file, mock_api_url, tmp_path):
-        part = DatasetPart(
-            part_index=0,
-            item_id="aaa",
-            filename="test.mszx",
-            num_indices=10,
-            download_url="/datasets/x/parts/aaa",
+    def test_204_already_cached(self, mock_api_url):
+        mock_response = MagicMock()
+        mock_response.status_code = 204
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        part = _make_part()
+        _ensure_extracted(mock_client, part)  # Should return without error
+
+        mock_client.get.assert_called_once_with(
+            "https://api.example.com/datasets/x/parts/aaa"
         )
+
+    @patch("msdatasets.download._poll_task")
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    def test_202_triggers_polling(self, mock_api_url, mock_poll):
+        mock_response = MagicMock()
+        mock_response.status_code = 202
+        mock_response.json.return_value = {
+            "task_id": "task-123",
+            "status_url": "/tasks/task-123",
+        }
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        part = _make_part()
+        _ensure_extracted(mock_client, part)
+
+        mock_poll.assert_called_once_with(mock_client, "task-123")
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    def test_404_raises(self, mock_api_url):
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        part = _make_part()
+        with pytest.raises(DownloadError, match="not found"):
+            _ensure_extracted(mock_client, part)
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    def test_500_raises(self, mock_api_url):
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = mock_response
+
+        part = _make_part()
+        with pytest.raises(DownloadError, match="500"):
+            _ensure_extracted(mock_client, part)
+
+
+class TestDownloadPart:
+    """Tests for the download_part function."""
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.download_file")
+    def test_downloads_file(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
+        part = _make_part()
         expected = tmp_path / "test.mszx"
         mock_dl_file.return_value = expected
 
-        result = download_part("x", part, tmp_path)
+        result = download_part(part, tmp_path)
 
         assert result == expected
+        mock_ensure.assert_called_once()
         mock_dl_file.assert_called_once_with(
-            "https://api.example.com/datasets/x/parts/aaa",
+            "https://api.example.com/transfer/files/aaa.mszx",
             expected,
             skip_existing=False,
             force=False,
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_file")
-    def test_passes_skip_existing(self, mock_dl_file, mock_api_url, tmp_path):
-        part = DatasetPart(
-            part_index=0,
-            item_id="aaa",
-            filename="test.mszx",
-            num_indices=10,
-            download_url="/datasets/x/parts/aaa",
-        )
+    def test_passes_skip_existing(
+        self, mock_dl_file, mock_ensure, mock_api_url, tmp_path
+    ):
+        part = _make_part()
         mock_dl_file.return_value = tmp_path / "test.mszx"
 
-        download_part("x", part, tmp_path, skip_existing=True)
+        download_part(part, tmp_path, skip_existing=True)
 
         mock_dl_file.assert_called_once_with(
-            "https://api.example.com/datasets/x/parts/aaa",
+            "https://api.example.com/transfer/files/aaa.mszx",
             tmp_path / "test.mszx",
             skip_existing=True,
             force=False,
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_file")
-    def test_passes_force(self, mock_dl_file, mock_api_url, tmp_path):
-        part = DatasetPart(
-            part_index=0,
-            item_id="aaa",
-            filename="test.mszx",
-            num_indices=10,
-            download_url="/datasets/x/parts/aaa",
-        )
+    def test_passes_force(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
+        part = _make_part()
         mock_dl_file.return_value = tmp_path / "test.mszx"
 
-        download_part("x", part, tmp_path, force=True)
+        download_part(part, tmp_path, force=True)
 
         mock_dl_file.assert_called_once_with(
-            "https://api.example.com/datasets/x/parts/aaa",
+            "https://api.example.com/transfer/files/aaa.mszx",
             tmp_path / "test.mszx",
             skip_existing=False,
             force=True,
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_file")
-    def test_creates_dest_dir(self, mock_dl_file, mock_api_url, tmp_path):
-        part = DatasetPart(
-            part_index=0,
-            item_id="aaa",
-            filename="test.mszx",
-            num_indices=10,
-            download_url="/datasets/x/parts/aaa",
-        )
+    def test_creates_dest_dir(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
+        part = _make_part()
         dest_dir = tmp_path / "nested" / "dir"
         mock_dl_file.return_value = dest_dir / "test.mszx"
 
-        download_part("x", part, dest_dir)
+        download_part(part, dest_dir)
 
         assert dest_dir.exists()
 
 
 class TestLoadDataset:
-    """
-    Tests for the load_dataset function.
-    """
+    """Tests for the load_dataset function."""
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
     @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_batch")
     def test_downloads_all_parts(
-        self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
@@ -246,20 +362,24 @@ class TestLoadDataset:
 
         assert len(ds) == 2
         assert ds.dataset_name == "Test Dataset"
+        # Extraction should have been triggered for both parts
+        assert mock_ensure.call_count == 2
+        # Downloads go through mstransfer
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 2
-        assert requests[0].url == "https://api.example.com/datasets/550e8400/parts/aaa"
+        assert requests[0].url == "https://api.example.com/transfer/files/aaa.mszx"
         assert requests[0].dest == ds_dir / "sample_01.mszx"
-        assert requests[1].url == "https://api.example.com/datasets/550e8400/parts/bbb"
+        assert requests[1].url == "https://api.example.com/transfer/files/bbb.mszx"
         assert requests[1].dest == ds_dir / "sample_02.mszx"
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
     @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_batch")
     def test_skips_existing_files(
-        self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
@@ -275,7 +395,8 @@ class TestLoadDataset:
         ds = load_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
-        # Only the missing part should be in the batch request
+        # Only the missing part should trigger extraction and download
+        assert mock_ensure.call_count == 1
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 1
@@ -284,9 +405,10 @@ class TestLoadDataset:
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
     @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download._ensure_extracted")
     @patch("msdatasets.download.download_batch")
     def test_force_redownloads(
-        self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
@@ -304,6 +426,58 @@ class TestLoadDataset:
         ds = load_dataset("550e8400", force_download=True, show_progress=False)
 
         assert len(ds) == 2
-        # Both parts should be requested despite one existing
+        # Both parts should be extracted and requested despite one existing
+        assert mock_ensure.call_count == 2
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 2
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download.download_batch")
+    def test_all_cached_skips_download(
+        self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        ds_dir.mkdir()
+        mock_dir.return_value = ds_dir
+        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        mock_fetch.return_value = manifest
+
+        # Pre-create all files
+        (ds_dir / "sample_01.mszx").write_bytes(b"existing")
+        (ds_dir / "sample_02.mszx").write_bytes(b"existing")
+
+        ds = load_dataset("550e8400", show_progress=False)
+
+        assert len(ds) == 2
+        mock_batch.assert_not_called()
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.download_batch")
+    def test_saves_manifest_json(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        mock_fetch.return_value = manifest
+        mock_batch.return_value = [
+            ds_dir / "sample_01.mszx",
+            ds_dir / "sample_02.mszx",
+        ]
+
+        load_dataset("550e8400", show_progress=False)
+
+        manifest_file = ds_dir / "manifest.json"
+        assert manifest_file.exists()
+        import json
+
+        saved = json.loads(manifest_file.read_text())
+        assert saved["dataset_id"] == "550e8400-e29b-41d4-a716-446655440000"
+        assert saved["total_parts"] == 2
+        assert saved["parts"][0]["extract_url"] == "/datasets/550e8400/parts/aaa"
+        assert saved["parts"][0]["download_url"] == "/transfer/files/aaa.mszx"

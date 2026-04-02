@@ -15,6 +15,7 @@ class DatasetPart:
     item_id: str
     filename: str
     num_indices: int
+    extract_url: str
     download_url: str
 
 
@@ -35,6 +36,7 @@ class Manifest:
                 item_id=p["item_id"],
                 filename=p["filename"],
                 num_indices=p["num_indices"],
+                extract_url=p["extract_url"],
                 download_url=p["download_url"],
             )
             for p in data["parts"]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
@@ -19,10 +21,16 @@ from rich.progress import (
 )
 
 from msdatasets.config import get_api_url, get_dataset_dir
-from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
 from msdatasets.models import Dataset, DatasetPart, Manifest
 
 log = logging.getLogger("msdatasets")
+
+# Task polling constants
+_POLL_INTERVAL = 1.0
+_POLL_MAX_INTERVAL = 10.0
+_POLL_BACKOFF = 1.5
+_POLL_TIMEOUT = 600.0
 
 
 def fetch_manifest(dataset_id: str, *, client: httpx.Client | None = None) -> Manifest:
@@ -55,8 +63,69 @@ def fetch_manifest(dataset_id: str, *, client: httpx.Client | None = None) -> Ma
     return manifest
 
 
+def _poll_task(client: httpx.Client, task_id: str) -> None:
+    """Poll a Celery extraction task until it reaches a terminal state."""
+    url = f"{get_api_url()}/tasks/{task_id}"
+    delay = _POLL_INTERVAL
+    elapsed = 0.0
+
+    while elapsed < _POLL_TIMEOUT:
+        resp = client.get(url)
+        if resp.status_code >= 400:
+            raise DownloadError(
+                f"Error polling task {task_id}: HTTP {resp.status_code}"
+            )
+
+        status = resp.json()
+        state = status.get("state")
+
+        if state == "complete":
+            return
+        if state == "failed":
+            raise ExtractionError(
+                f"Server extraction failed: {status.get('error', 'unknown error')}"
+            )
+
+        log.debug("Task %s: %s (%.1fs elapsed)", task_id, state, elapsed)
+        time.sleep(delay)
+        elapsed += delay
+        delay = min(delay * _POLL_BACKOFF, _POLL_MAX_INTERVAL)
+
+    raise DownloadError(f"Timed out waiting for extraction task {task_id}")
+
+
+def _ensure_extracted(client: httpx.Client, part: DatasetPart) -> None:
+    """Ensure a dataset part is extracted and ready for download.
+
+    Hits the extraction endpoint.  If the server returns **204** the
+    file is already cached.  If the server returns **202 Accepted**,
+    the JSON payload is read to obtain the ``task_id`` and the task is
+    polled until extraction completes.
+    """
+    url = f"{get_api_url()}{part.extract_url}"
+    log.debug("Checking extraction status for %s", part.filename)
+
+    resp = client.get(url)
+
+    if resp.status_code == 204:
+        log.debug("Already extracted: %s", part.filename)
+        return
+
+    if resp.status_code == 202:
+        task_info = resp.json()
+        task_id = task_info["task_id"]
+        log.info("Extraction queued for %s (task %s)", part.filename, task_id)
+        _poll_task(client, task_id)
+        log.debug("Extraction complete: %s", part.filename)
+        return
+
+    if resp.status_code == 404:
+        raise DownloadError(f"Part not found: {part.filename}")
+
+    raise DownloadError(f"Server error {resp.status_code} for {part.filename}")
+
+
 def download_part(
-    dataset_id: str,
     part: DatasetPart,
     dest_dir: Path,
     *,
@@ -65,13 +134,21 @@ def download_part(
 ) -> Path:
     """Download a single dataset part to *dest_dir* via mstransfer.
 
-    Thin wrapper around :func:`mstransfer.client.download_file`.
+    If the server needs to extract the file first (202 Accepted), polls
+    the task endpoint until the file is ready, then downloads via the
+    mstransfer endpoint.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    url = f"{get_api_url()}{part.download_url}"
+    download_url = f"{get_api_url()}{part.download_url}"
     dest = dest_dir / part.filename
-    log.debug("Downloading %s from %s", part.filename, url)
-    result: Path = download_file(url, dest, skip_existing=skip_existing, force=force)
+    log.debug("Downloading %s via %s", part.filename, download_url)
+
+    with httpx.Client(follow_redirects=True) as client:
+        _ensure_extracted(client, part)
+
+    result: Path = download_file(
+        download_url, dest, skip_existing=skip_existing, force=force
+    )
     return result
 
 
@@ -130,51 +207,62 @@ def load_dataset(
     with httpx.Client(follow_redirects=True, timeout=timeout) as client:
         manifest = fetch_manifest(dataset_id, client=client)
 
-    # Persist manifest locally for offline inspection
-    manifest_path = dataset_dir / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "dataset_id": manifest.dataset_id,
-                "dataset_name": manifest.dataset_name,
-                "total_parts": manifest.total_parts,
-                "parts": [
-                    {
-                        "part_index": p.part_index,
-                        "item_id": p.item_id,
-                        "filename": p.filename,
-                        "num_indices": p.num_indices,
-                        "download_url": p.download_url,
-                    }
-                    for p in manifest.parts
-                ],
-            },
-            indent=2,
+        # Persist manifest locally for offline inspection
+        manifest_path = dataset_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "dataset_id": manifest.dataset_id,
+                    "dataset_name": manifest.dataset_name,
+                    "total_parts": manifest.total_parts,
+                    "parts": [
+                        {
+                            "part_index": p.part_index,
+                            "item_id": p.item_id,
+                            "filename": p.filename,
+                            "num_indices": p.num_indices,
+                            "extract_url": p.extract_url,
+                            "download_url": p.download_url,
+                        }
+                        for p in manifest.parts
+                    ],
+                },
+                indent=2,
+            )
         )
-    )
 
-    base_url = get_api_url()
-    files: list[Path] = []
-    parts_to_download: list[DatasetPart] = []
+        files: list[Path] = []
+        parts_to_download: list[DatasetPart] = []
 
-    for part in manifest.parts:
-        dest = dataset_dir / part.filename
-        if dest.exists() and not force_download:
-            log.debug("Cached, skipping: %s", part.filename)
-            files.append(dest)
+        for part in manifest.parts:
+            dest = dataset_dir / part.filename
+            if dest.exists() and not force_download:
+                log.debug("Cached, skipping: %s", part.filename)
+                files.append(dest)
+            else:
+                parts_to_download.append(part)
+
+        if parts_to_download:
+            log.info(
+                "Downloading %d/%d part(s)",
+                len(parts_to_download),
+                manifest.total_parts,
+            )
+
+            # Ensure all parts are extracted server-side before downloading.
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_ensure_extracted, client, part): part
+                    for part in parts_to_download
+                }
+                for future in as_completed(futures):
+                    future.result()
         else:
-            parts_to_download.append(part)
+            log.info("All %d part(s) already cached", manifest.total_parts)
 
+    # Download all ready files via mstransfer.
     if parts_to_download:
-        log.info(
-            "Downloading %d/%d part(s)",
-            len(parts_to_download),
-            manifest.total_parts,
-        )
-    else:
-        log.info("All %d part(s) already cached", manifest.total_parts)
-
-    if parts_to_download:
+        base_url = get_api_url()
         requests = [
             DownloadRequest(
                 url=f"{base_url}{part.download_url}",

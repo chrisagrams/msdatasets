@@ -7,3 +7,7 @@ class DatasetNotFoundError(Exception):
 
 class DownloadError(Exception):
     """Raised on network or server failures during download."""
+
+
+class ExtractionError(DownloadError):
+    """Raised when a server-side extraction task fails."""
