@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import httpx
+from mstransfer.client import download_batch, download_file
+from mstransfer.client.downloader import DownloadRequest
 from rich.progress import (
     BarColumn,
     DownloadColumn,
     Progress,
+    TaskID,
     TextColumn,
     TransferSpeedColumn,
 )
@@ -58,57 +60,45 @@ def download_part(
     part: DatasetPart,
     dest_dir: Path,
     *,
-    client: httpx.Client | None = None,
-    progress: Progress | None = None,
+    skip_existing: bool = False,
+    force: bool = False,
 ) -> Path:
-    """Stream a single dataset part to *dest_dir*.
+    """Download a single dataset part to *dest_dir* via mstransfer.
 
-    Uses atomic writes: data is written to a ``.part`` temp file, then
-    renamed to the final filename on success.
+    Thin wrapper around :func:`mstransfer.client.download_file`.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final_path = dest_dir / part.filename
-    temp_path = dest_dir / f"{part.filename}.part"
-
-    base_url = get_api_url()
-    url = f"{base_url}{part.download_url}"
+    url = f"{get_api_url()}{part.download_url}"
+    dest = dest_dir / part.filename
     log.debug("Downloading %s from %s", part.filename, url)
+    result: Path = download_file(url, dest, skip_existing=skip_existing, force=force)
+    return result
 
-    def _stream(c: httpx.Client) -> None:
-        with c.stream("GET", url) as resp:
-            if resp.status_code == 404:
-                raise DatasetNotFoundError(
-                    f"Part not found: {part.item_id} in dataset {dataset_id}"
-                )
-            if resp.status_code >= 400:
-                raise DownloadError(
-                    f"Server error {resp.status_code} downloading {part.filename}"
-                )
 
-            total = int(resp.headers.get("content-length", 0)) or None
+class _RichBatchProgress:
+    """Adapts a rich :class:`Progress` bar to mstransfer's
+    :class:`BatchDownloadProgress` callback protocol."""
 
-            task_id = None
-            if progress is not None:
-                task_id = progress.add_task(part.filename, total=total)
+    def __init__(self, progress: Progress) -> None:
+        self._progress = progress
+        self._tasks: dict[str, TaskID] = {}
 
-            with open(temp_path, "wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=8192):
-                    f.write(chunk)
-                    if progress is not None and task_id is not None:
-                        progress.update(task_id, advance=len(chunk))
+    def on_file_start(self, filename: str, total_bytes: int | None) -> None:
+        self._tasks[filename] = self._progress.add_task(filename, total=total_bytes)
 
-        # Atomic rename
-        temp_path.rename(final_path)
-        log.debug("Saved %s", final_path)
+    def on_file_progress(self, filename: str, bytes_delta: int) -> None:
+        if filename in self._tasks:
+            self._progress.update(self._tasks[filename], advance=bytes_delta)
 
-    if client is not None:
-        _stream(client)
-    else:
-        timeout = httpx.Timeout(10.0, read=300.0)
-        with httpx.Client(follow_redirects=True, timeout=timeout) as c:
-            _stream(c)
+    def on_file_complete(self, filename: str) -> None:
+        pass
 
-    return final_path
+    def on_file_error(self, filename: str, error: Exception) -> None:
+        if filename in self._tasks:
+            self._progress.update(
+                self._tasks[filename],
+                description=f"[red]{filename} (error)",
+            )
 
 
 def load_dataset(
@@ -140,83 +130,84 @@ def load_dataset(
     with httpx.Client(follow_redirects=True, timeout=timeout) as client:
         manifest = fetch_manifest(dataset_id, client=client)
 
-        # Persist manifest locally for offline inspection
-        manifest_path = dataset_dir / "manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "dataset_id": manifest.dataset_id,
-                    "dataset_name": manifest.dataset_name,
-                    "total_parts": manifest.total_parts,
-                    "parts": [
-                        {
-                            "part_index": p.part_index,
-                            "item_id": p.item_id,
-                            "filename": p.filename,
-                            "num_indices": p.num_indices,
-                            "download_url": p.download_url,
-                        }
-                        for p in manifest.parts
-                    ],
-                },
-                indent=2,
-            )
+    # Persist manifest locally for offline inspection
+    manifest_path = dataset_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "dataset_id": manifest.dataset_id,
+                "dataset_name": manifest.dataset_name,
+                "total_parts": manifest.total_parts,
+                "parts": [
+                    {
+                        "part_index": p.part_index,
+                        "item_id": p.item_id,
+                        "filename": p.filename,
+                        "num_indices": p.num_indices,
+                        "download_url": p.download_url,
+                    }
+                    for p in manifest.parts
+                ],
+            },
+            indent=2,
         )
+    )
 
-        files: list[Path] = []
-        parts_to_download: list[DatasetPart] = []
+    base_url = get_api_url()
+    files: list[Path] = []
+    parts_to_download: list[DatasetPart] = []
 
-        for part in manifest.parts:
-            dest = dataset_dir / part.filename
-            if dest.exists() and not force_download:
-                log.debug("Cached, skipping: %s", part.filename)
-                files.append(dest)
-            else:
-                parts_to_download.append(part)
-
-        if parts_to_download:
-            log.info(
-                "Downloading %d/%d part(s)",
-                len(parts_to_download),
-                manifest.total_parts,
-            )
+    for part in manifest.parts:
+        dest = dataset_dir / part.filename
+        if dest.exists() and not force_download:
+            log.debug("Cached, skipping: %s", part.filename)
+            files.append(dest)
         else:
-            log.info("All %d part(s) already cached", manifest.total_parts)
+            parts_to_download.append(part)
 
-        if parts_to_download:
-            workers = min(max_workers, len(parts_to_download))
-            log.debug("Using %d worker(s)", workers)
+    if parts_to_download:
+        log.info(
+            "Downloading %d/%d part(s)",
+            len(parts_to_download),
+            manifest.total_parts,
+        )
+    else:
+        log.info("All %d part(s) already cached", manifest.total_parts)
 
-            progress: Progress | None = None
-            if show_progress:
-                progress = Progress(
-                    TextColumn("[bold blue]{task.description}"),
-                    BarColumn(),
-                    DownloadColumn(),
-                    TransferSpeedColumn(),
-                )
-
-            ctx = progress if progress is not None else _NullContext()
-            with ctx, ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {
-                    pool.submit(
-                        download_part,
-                        dataset_id,
-                        part,
-                        dataset_dir,
-                        progress=progress,
-                    ): part
-                    for part in parts_to_download
-                }
-                for future in as_completed(futures):
-                    files.append(future.result())
-        # Ensure files are ordered by part_index
-        file_map = {p.name: p for p in files}
-        ordered_files = [
-            file_map[part.filename]
-            for part in manifest.parts
-            if part.filename in file_map
+    if parts_to_download:
+        requests = [
+            DownloadRequest(
+                url=f"{base_url}{part.download_url}",
+                dest=dataset_dir / part.filename,
+            )
+            for part in parts_to_download
         ]
+
+        progress_bar: Progress | None = None
+        batch_progress: _RichBatchProgress | None = None
+        if show_progress:
+            progress_bar = Progress(
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+            )
+            batch_progress = _RichBatchProgress(progress_bar)
+
+        ctx = progress_bar if progress_bar is not None else _NullContext()
+        with ctx:
+            downloaded = download_batch(
+                requests,
+                parallel=max_workers,
+                progress=batch_progress,
+            )
+            files.extend(downloaded)
+
+    # Ensure files are ordered by part_index
+    file_map = {p.name: p for p in files}
+    ordered_files = [
+        file_map[part.filename] for part in manifest.parts if part.filename in file_map
+    ]
 
     ds = Dataset(
         dataset_id=manifest.dataset_id,
@@ -231,8 +222,8 @@ def load_dataset(
 class _NullContext:
     """Minimal context manager for Python 3.10 compatibility."""
 
-    def __enter__(self):
+    def __enter__(self) -> _NullContext:
         return self
 
-    def __exit__(self, *exc):
-        return False
+    def __exit__(self, *exc: object) -> None:
+        pass
