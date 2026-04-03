@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 
-from msdatasets.download import download_dataset, load_dataset
+from msdatasets.download import download_dataset, load_dataset, load_pride_dataset
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
 from msdatasets.models import Dataset
 
@@ -13,5 +13,6 @@ __all__ = [
     "ExtractionError",
     "download_dataset",
     "load_dataset",
+    "load_pride_dataset",
     "__version__",
 ]

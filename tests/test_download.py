@@ -1,17 +1,15 @@
-"""Tests for msdatasets.download."""
+"""Tests for msdatasets.download and msdatasets.client."""
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from msdatasets.client import ensure_extracted, fetch_manifest
 from msdatasets.download import (
-    _ensure_extracted,
-    _poll_task,
     download_dataset,
     download_part,
-    fetch_manifest,
     load_dataset,
 )
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
@@ -61,7 +59,7 @@ class TestManifest:
     """Tests for the Manifest model."""
 
     def test_from_dict(self):
-        m = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        m = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         assert m.dataset_id == "550e8400-e29b-41d4-a716-446655440000"
         assert m.dataset_name == "Test Dataset"
         assert m.total_parts == 2
@@ -69,11 +67,11 @@ class TestManifest:
 
     def test_from_dict_null_name(self):
         data = {**SAMPLE_MANIFEST_DICT, "dataset_name": None}
-        m = Manifest.from_dict(data)
+        m = Manifest.model_validate(data)
         assert m.dataset_name is None
 
     def test_parts_are_datasetpart(self):
-        m = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        m = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         p = m.parts[0]
         assert isinstance(p, DatasetPart)
         assert p.part_index == 0
@@ -120,117 +118,65 @@ class TestDataset:
 class TestFetchManifest:
     """Tests for the fetch_manifest function."""
 
-    def test_success(self):
+    @pytest.mark.asyncio
+    async def test_success(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = SAMPLE_MANIFEST_DICT
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
-        m = fetch_manifest("550e8400", client=mock_client)
+        m = await fetch_manifest("550e8400", client=mock_client)
         assert m.dataset_id == "550e8400-e29b-41d4-a716-446655440000"
         assert len(m.parts) == 2
 
-    def test_404_raises_not_found(self):
+    @pytest.mark.asyncio
+    async def test_404_raises_not_found(self):
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         with pytest.raises(DatasetNotFoundError, match="not found"):
-            fetch_manifest("bad-id", client=mock_client)
+            await fetch_manifest("bad-id", client=mock_client)
 
-    def test_500_raises_download_error(self):
+    @pytest.mark.asyncio
+    async def test_500_raises_download_error(self):
         mock_response = MagicMock()
         mock_response.status_code = 500
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         with pytest.raises(DownloadError, match="500"):
-            fetch_manifest("some-id", client=mock_client)
-
-
-class TestPollTask:
-    """Tests for _poll_task."""
-
-    def test_complete_immediately(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"task_id": "t1", "state": "complete"}
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        _poll_task(mock_client, "t1")  # Should return without error
-
-    def test_failed_raises_extraction_error(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "task_id": "t1",
-            "state": "failed",
-            "error": "out of memory",
-        }
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(ExtractionError, match="out of memory"):
-            _poll_task(mock_client, "t1")
-
-    @patch("msdatasets.download.time.sleep")
-    def test_polls_until_complete(self, mock_sleep):
-        processing = MagicMock()
-        processing.status_code = 200
-        processing.json.return_value = {"task_id": "t1", "state": "processing"}
-
-        complete = MagicMock()
-        complete.status_code = 200
-        complete.json.return_value = {"task_id": "t1", "state": "complete"}
-
-        mock_client = MagicMock()
-        mock_client.get.side_effect = [processing, processing, complete]
-
-        _poll_task(mock_client, "t1")
-
-        assert mock_client.get.call_count == 3
-        assert mock_sleep.call_count == 2
-
-    def test_server_error_raises(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(DownloadError, match="500"):
-            _poll_task(mock_client, "t1")
+            await fetch_manifest("some-id", client=mock_client)
 
 
 class TestEnsureExtracted:
-    """Tests for _ensure_extracted."""
+    """Tests for ensure_extracted."""
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_204_already_cached(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_204_already_cached(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 204
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
-        _ensure_extracted(mock_client, part)  # Should return without error
+        await ensure_extracted(mock_client, part)  # Should return without error
 
         mock_client.get.assert_called_once_with(
             "https://api.example.com/datasets/x/parts/aaa"
         )
 
-    @patch("msdatasets.download._poll_task")
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_202_triggers_polling(self, mock_api_url, mock_poll):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.stream_task", new_callable=AsyncMock)
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_202_streams_task(self, mock_api_url, mock_stream):
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = {
@@ -238,44 +184,46 @@ class TestEnsureExtracted:
             "status_url": "/tasks/task-123",
         }
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
-        _ensure_extracted(mock_client, part)
+        await ensure_extracted(mock_client, part)
 
-        mock_poll.assert_called_once_with(mock_client, "task-123")
+        mock_stream.assert_called_once_with(mock_client, "task-123")
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_404_raises(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_404_raises(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
         with pytest.raises(DownloadError, match="not found"):
-            _ensure_extracted(mock_client, part)
+            await ensure_extracted(mock_client, part)
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_500_raises(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_500_raises(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 500
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
         with pytest.raises(DownloadError, match="500"):
-            _ensure_extracted(mock_client, part)
+            await ensure_extracted(mock_client, part)
 
 
 class TestDownloadPart:
     """Tests for the download_part function."""
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_downloads_file(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -294,7 +242,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_passes_skip_existing(
         self, mock_dl_file, mock_ensure, mock_api_url, tmp_path
@@ -312,7 +260,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_passes_force(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -328,7 +276,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_creates_dest_dir(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -345,15 +293,15 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_downloads_all_parts(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         mock_batch.return_value = [
@@ -365,8 +313,8 @@ class TestDownloadDataset:
 
         assert len(ds) == 2
         assert ds.dataset_name == "Test Dataset"
-        # Extraction should have been triggered for both parts
-        assert mock_ensure.call_count == 2
+        # Extraction should have been triggered
+        mock_ensure.assert_called_once()
         # Downloads go through mstransfer
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
@@ -378,8 +326,8 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_skips_existing_files(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -387,7 +335,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         # Pre-create one file
@@ -398,8 +346,8 @@ class TestDownloadDataset:
         ds = download_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
-        # Only the missing part should trigger extraction and download
-        assert mock_ensure.call_count == 1
+        # Extraction should have been triggered for the missing part
+        mock_ensure.assert_called_once()
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 1
@@ -407,8 +355,8 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_force_redownloads(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -416,7 +364,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         (ds_dir / "sample_01.mszx").write_bytes(b"existing")
@@ -430,13 +378,13 @@ class TestDownloadDataset:
 
         assert len(ds) == 2
         # Both parts should be extracted and requested despite one existing
-        assert mock_ensure.call_count == 2
+        mock_ensure.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 2
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_all_cached_skips_download(
         self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -444,7 +392,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         # Pre-create all files
@@ -458,15 +406,15 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_saves_manifest_json(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
         mock_batch.return_value = [
             ds_dir / "sample_01.mszx",

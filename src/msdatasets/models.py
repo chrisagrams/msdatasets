@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
+
+from pydantic import BaseModel
 
 
-@dataclass(frozen=True)
-class DatasetPart:
+class PrideImportStatus(str, enum.Enum):
+    """Status of a PRIDE file import job."""
+
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
+    CONVERTING = "converting"
+    INDEXING = "indexing"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class DatasetPart(BaseModel, frozen=True):
     """A single downloadable part of a dataset."""
 
     part_index: int
@@ -19,34 +32,38 @@ class DatasetPart:
     download_url: str
 
 
-@dataclass
-class Manifest:
+class PrideDatasetRequest(BaseModel):
+    """Request body for creating a dataset from a PRIDE project."""
+
+    filenames: list[str] | None = None
+
+
+class PrideImportJob(BaseModel):
+    """Status of a single PRIDE file import job."""
+
+    status: PrideImportStatus
+    pride_file_name: str | None = None
+    job_id: str | None = None
+    error_message: str | None = None
+
+
+class PrideDatasetResponse(BaseModel):
+    """Response from the PRIDE dataset creation endpoint."""
+
+    dataset_id: str
+    dataset_name: str
+    accession: str
+    total_files: int
+    jobs: list[PrideImportJob]
+
+
+class Manifest(BaseModel):
     """Parsed server manifest describing available dataset parts."""
 
     dataset_id: str
-    dataset_name: str | None
+    dataset_name: str | None = None
     total_parts: int
     parts: list[DatasetPart]
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Manifest:
-        parts = [
-            DatasetPart(
-                part_index=p["part_index"],
-                item_id=p["item_id"],
-                filename=p["filename"],
-                num_indices=p["num_indices"],
-                extract_url=p["extract_url"],
-                download_url=p["download_url"],
-            )
-            for p in data["parts"]
-        ]
-        return cls(
-            dataset_id=data["dataset_id"],
-            dataset_name=data.get("dataset_name"),
-            total_parts=data["total_parts"],
-            parts=parts,
-        )
 
 
 @dataclass
