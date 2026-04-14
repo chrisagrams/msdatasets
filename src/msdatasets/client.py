@@ -2,50 +2,54 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import TypeVar
 
 import httpx
+from httpx_sse import aconnect_sse
 
 from msdatasets.config import get_api_url
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
 from msdatasets.models import (
     DatasetPart,
     Manifest,
+    NotificationEvent,
     RepoDatasetRequest,
     RepoDatasetResponse,
+    RepoImportEvent,
     RepoImportStatus,
     RepoSource,
+    TaskEvent,
 )
 
 log = logging.getLogger("msdatasets")
 
+T = TypeVar("T", bound=NotificationEvent)
+
 
 async def _iter_sse_events(
-    response: httpx.Response,
-) -> AsyncIterator[tuple[str | None, dict[str, Any]]]:
-    """Parse SSE events from an httpx streaming response."""
-    event_type: str | None = None
-    data_lines: list[str] = []
-    async for line in response.aiter_lines():
-        if line.startswith("event:"):
-            event_type = line[6:].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line[5:].strip())
-        elif line == "":
-            if data_lines:
-                data = "\n".join(data_lines)
-                yield event_type, json.loads(data)
-                event_type = None
-                data_lines = []
-        # Lines starting with ":" are keep-alive pings — ignore
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    model: type[T],
+) -> AsyncIterator[tuple[str, T | None]]:
+    """Connect to an SSE endpoint and yield ``(event_type, event)`` pairs.
 
-    # Flush any pending event when the stream closes
-    if data_lines:
-        data = "\n".join(data_lines)
-        yield event_type, json.loads(data)
+    Events whose type is ``"done"`` yield ``None`` for the event payload
+    since the terminal sentinel carries no schema-relevant data.  All
+    other events are validated against *model*.
+    """
+    async with aconnect_sse(client, method, url) as source:
+        if source.response.status_code != 200:
+            raise DownloadError(
+                f"SSE stream failed for {url}: HTTP {source.response.status_code}"
+            )
+        async for sse in source.aiter_sse():
+            if sse.event == "done":
+                yield sse.event, None
+                continue
+            yield sse.event, model.model_validate_json(sse.data)
 
 
 async def fetch_manifest(
@@ -80,22 +84,16 @@ async def fetch_manifest(
 async def stream_task(client: httpx.AsyncClient, task_id: str) -> None:
     """Stream SSE events for an extraction task until it reaches a terminal state."""
     url = f"{get_api_url()}/tasks/{task_id}/stream"
-    async with client.stream("GET", url) as response:
-        if response.status_code != 200:
-            raise DownloadError(
-                f"SSE stream failed for task {task_id}: HTTP {response.status_code}"
+    async for event_type, event in _iter_sse_events(client, "GET", url, TaskEvent):
+        if event_type == "done" or event is None:
+            return
+        if event.state == "complete":
+            return
+        if event.state == "failed":
+            raise ExtractionError(
+                f"Server extraction failed: {event.error or 'unknown error'}"
             )
-        async for event_type, data in _iter_sse_events(response):
-            if event_type == "done":
-                return
-            state = data.get("state")
-            if state == "complete":
-                return
-            if state == "failed":
-                raise ExtractionError(
-                    f"Server extraction failed: {data.get('error', 'unknown error')}"
-                )
-            log.debug("Task %s: %s", task_id, state)
+        log.debug("Task %s: %s", task_id, event.state)
 
 
 async def ensure_extracted(client: httpx.AsyncClient, part: DatasetPart) -> None:
@@ -149,40 +147,34 @@ async def _stream_repo_import(
     url = f"{get_api_url()}/repositories/datasets/{result.dataset_id}/stream"
     job_states: dict[str, RepoImportStatus] = {}
 
-    async with client.stream("GET", url) as response:
-        if response.status_code != 200:
+    async for event_type, event in _iter_sse_events(
+        client, "GET", url, RepoImportEvent
+    ):
+        if event_type == "done" or event is None:
+            return
+
+        file_name = event.file_name or "unknown"
+
+        if event.status == RepoImportStatus.FAILED:
             raise DownloadError(
-                f"SSE stream failed for repository import: HTTP {response.status_code}"
-            )
-        async for event_type, data in _iter_sse_events(response):
-            if event_type == "done":
-                return
-
-            status = RepoImportStatus(data["status"])
-            file_name = data.get("file_name", "unknown")
-
-            if status == RepoImportStatus.FAILED:
-                error = data.get("error_message") or "unknown error"
-                raise DownloadError(
-                    f"Repository import failed for {file_name}: {error}"
-                )
-
-            job_states[data["job_id"]] = status
-
-            if on_status is not None:
-                on_status(file_name, status)
-
-            complete = sum(
-                1 for s in job_states.values() if s == RepoImportStatus.COMPLETE
-            )
-            log.info(
-                "Repository import: %d/%d files ready",
-                complete,
-                len(job_states),
+                f"Repository import failed for {file_name}: "
+                f"{event.error_message or 'unknown error'}"
             )
 
-            if all(s == RepoImportStatus.COMPLETE for s in job_states.values()):
-                return
+        job_states[event.job_id] = event.status
+
+        if on_status is not None:
+            on_status(file_name, event.status)
+
+        complete = sum(1 for s in job_states.values() if s == RepoImportStatus.COMPLETE)
+        log.info(
+            "Repository import: %d/%d files ready",
+            complete,
+            len(job_states),
+        )
+
+        if all(s == RepoImportStatus.COMPLETE for s in job_states.values()):
+            return
 
 
 async def trigger_repo_import(

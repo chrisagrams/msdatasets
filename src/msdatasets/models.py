@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class RepoSource(str, enum.Enum):
@@ -65,6 +65,40 @@ class RepoDatasetResponse(BaseModel):
     accession: str
     total_files: int
     jobs: list[RepoImportJob]
+
+
+class NotificationEvent(BaseModel):
+    """Base schema for a payload received over an SSE stream."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    def is_terminal(self) -> bool:
+        """Return ``True`` when this event represents a terminal state."""
+        return False
+
+
+class TaskEvent(NotificationEvent):
+    """SSE payload from ``/tasks/{task_id}/stream``."""
+
+    state: str
+    error: str | None = None
+
+    def is_terminal(self) -> bool:
+        return self.state in ("complete", "failed")
+
+
+class RepoImportEvent(NotificationEvent):
+    """SSE payload from ``/repositories/datasets/{dataset_id}/stream``."""
+
+    status: RepoImportStatus
+    job_id: str
+    source: RepoSource | None = None
+    file_name: str | None = None
+    dataset_id: str | None = None
+    error_message: str | None = None
+
+    def is_terminal(self) -> bool:
+        return self.status in (RepoImportStatus.COMPLETE, RepoImportStatus.FAILED)
 
 
 class Manifest(BaseModel):
