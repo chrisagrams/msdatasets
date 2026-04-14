@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import httpx
 from mstransfer.client import download_batch, download_file
 from mstransfer.client.downloader import DownloadRequest
+from rich.console import Console
 from rich.progress import (
     BarColumn,
     DownloadColumn,
@@ -23,32 +24,38 @@ from rich.progress import (
     TransferSpeedColumn,
 )
 
-from rich.console import Console
-
 from msdatasets.client import (
     ensure_all_extracted,
     ensure_extracted,
     fetch_manifest,
-    trigger_pride_import,
+    trigger_repo_import,
 )
 from msdatasets.config import get_api_url, get_dataset_dir
-from msdatasets.models import Dataset, DatasetPart, Manifest, PrideImportStatus
+from msdatasets.models import (
+    Dataset,
+    DatasetPart,
+    Manifest,
+    RepoImportStatus,
+    RepoSource,
+)
 
-_STATUS_LABELS: dict[PrideImportStatus, str] = {
-    PrideImportStatus.PENDING: "Pending",
-    PrideImportStatus.DOWNLOADING: "Downloading from PRIDE",
-    PrideImportStatus.CONVERTING: "Converting to MSZX",
-    PrideImportStatus.INDEXING: "Indexing",
-    PrideImportStatus.COMPLETE: "Complete",
+_STATUS_LABELS: dict[RepoImportStatus, str] = {
+    RepoImportStatus.PENDING: "Pending",
+    RepoImportStatus.DOWNLOADING: "Downloading",
+    RepoImportStatus.CONVERTING: "Converting to MSZX",
+    RepoImportStatus.INDEXING: "Indexing",
+    RepoImportStatus.COMPLETE: "Complete",
 }
 
 log = logging.getLogger("msdatasets")
 
-_PRIDE_PATTERN = re.compile(r"^pride/(PXD\d+)(?:\[([^\]]+)\])?$")
+_REPO_PATTERN = re.compile(
+    r"^(?P<source>pride|massive)/(?P<accession>[^\[\]/]+)(?:\[(?P<files>[^\]]+)\])?$"
+)
 
 
 def _import_torch_dataset() -> type[MSCompressDataset]:
-    """Import and return MSCompressDataset, raising a helpful error if torch is missing."""
+    """Import MSCompressDataset, raising a helpful error if torch is missing."""
     try:
         from mscompress.datasets.torch import MSCompressDataset
     except ImportError:
@@ -228,7 +235,8 @@ def download_dataset(
     return ds
 
 
-def load_pride_dataset(
+def load_repo_dataset(
+    source: RepoSource | str,
     accession: str,
     *,
     filenames: list[str] | None = None,
@@ -236,19 +244,23 @@ def load_pride_dataset(
     show_progress: bool = True,
     max_workers: int = 4,
 ) -> MSCompressDataset:
-    """Trigger a PRIDE import and return an :class:`MSCompressDataset` once ready.
+    """Trigger a repository import and return an :class:`MSCompressDataset` once ready.
 
-    Posts to ``/pride/{accession}/dataset`` to create a dataset from a
-    PRIDE project.  The endpoint is idempotent—calling it for an
-    already-imported project returns the existing dataset and job statuses.
+    Posts to ``/repositories/{source}/projects/{accession}/dataset`` to create
+    a dataset from a PRIDE or MassIVE project.  The endpoint is
+    idempotent—calling it for an already-imported project returns the
+    existing dataset and job statuses.
 
     Parameters
     ----------
+    source:
+        Repository source (``"pride"`` or ``"massive"``).
     accession:
-        PRIDE project accession (e.g. ``PXD075509``).
+        Project accession (e.g. ``PXD075509`` for PRIDE, ``MSV000078787`` for
+        MassIVE).
     filenames:
-        Optional list of specific mzML filenames to import. When *None*,
-        all files in the project are imported.
+        Optional list of specific filenames to import. When *None*, all
+        files in the project are imported.
     force_download:
         Re-download parts even if they already exist on disk.
     show_progress:
@@ -256,7 +268,8 @@ def load_pride_dataset(
     max_workers:
         Maximum number of parallel downloads.
     """
-    MSCompressDataset = _import_torch_dataset()
+    source = RepoSource(source)
+    dataset_cls = _import_torch_dataset()
     console = Console(stderr=True)
 
     async def _import() -> str:
@@ -264,27 +277,24 @@ def load_pride_dataset(
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             if show_progress:
                 with console.status(
-                    f"[bold blue]PRIDE import {accession}: pending…",
+                    f"[bold blue]{source.value} import {accession}: pending…",
                     spinner="dots",
                 ) as spinner:
 
-                    def _on_status(
-                        file_name: str, status: PrideImportStatus
-                    ) -> None:
+                    def _on_status(file_name: str, status: RepoImportStatus) -> None:
                         label = _STATUS_LABELS.get(status, status.value)
-                        spinner.update(
-                            f"[bold blue]{file_name}: {label}…"
-                        )
+                        spinner.update(f"[bold blue]{file_name}: {label}…")
 
-                    result = await trigger_pride_import(
+                    result = await trigger_repo_import(
+                        source,
                         accession,
                         filenames=filenames,
                         client=client,
                         on_status=_on_status,
                     )
             else:
-                result = await trigger_pride_import(
-                    accession, filenames=filenames, client=client
+                result = await trigger_repo_import(
+                    source, accession, filenames=filenames, client=client
                 )
             return result.dataset_id
 
@@ -297,7 +307,7 @@ def load_pride_dataset(
         max_workers=max_workers,
         filenames=filenames,
     )
-    return MSCompressDataset(ds.cache_dir)
+    return dataset_cls(ds.cache_dir)
 
 
 def load_dataset(
@@ -313,14 +323,16 @@ def load_dataset(
     downloaded files into an :class:`mscompress.datasets.torch.MSCompressDataset`
     ready for iteration.  Requires PyTorch to be installed.
 
-    If *dataset_id* matches the pattern ``pride/<accession>`` (e.g.
-    ``pride/PXD075509``), the PRIDE import flow is used instead.
+    If *dataset_id* matches the pattern ``{source}/<accession>`` (e.g.
+    ``pride/PXD075509`` or ``massive/MSV000078787``), the repository import
+    flow is used instead.  A specific filename subset may be specified in
+    square brackets: ``pride/PXD000001[file1.raw,file2.mzML]``.
 
     Parameters
     ----------
     dataset_id:
-        Server-side dataset identifier, or a PRIDE specifier like
-        ``pride/PXD075509``.
+        Server-side dataset identifier, or a repository specifier like
+        ``pride/PXD075509`` or ``massive/MSV000078787``.
     force_download:
         Re-download parts even if they already exist on disk.
     show_progress:
@@ -328,15 +340,14 @@ def load_dataset(
     max_workers:
         Maximum number of parallel downloads.
     """
-    match = _PRIDE_PATTERN.match(dataset_id)
+    match = _REPO_PATTERN.match(dataset_id)
     if match:
-        accession = match.group(1)
-        filenames = (
-            [f.strip() for f in match.group(2).split(",")]
-            if match.group(2)
-            else None
-        )
-        return load_pride_dataset(
+        source = RepoSource(match.group("source"))
+        accession = match.group("accession")
+        files_group = match.group("files")
+        filenames = [f.strip() for f in files_group.split(",")] if files_group else None
+        return load_repo_dataset(
+            source,
             accession,
             filenames=filenames,
             force_download=force_download,
@@ -344,7 +355,7 @@ def load_dataset(
             max_workers=max_workers,
         )
 
-    MSCompressDataset = _import_torch_dataset()
+    dataset_cls = _import_torch_dataset()
 
     ds = download_dataset(
         dataset_id,
@@ -352,7 +363,7 @@ def load_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return MSCompressDataset(ds.cache_dir)
+    return dataset_cls(ds.cache_dir)
 
 
 class _NullContext:

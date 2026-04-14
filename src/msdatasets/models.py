@@ -10,8 +10,15 @@ from typing import Iterator
 from pydantic import BaseModel
 
 
-class PrideImportStatus(str, enum.Enum):
-    """Status of a PRIDE file import job."""
+class RepoSource(str, enum.Enum):
+    """Supported repository sources for dataset imports."""
+
+    PRIDE = "pride"
+    MASSIVE = "massive"
+
+
+class RepoImportStatus(str, enum.Enum):
+    """Status of a repository file import job."""
 
     PENDING = "pending"
     DOWNLOADING = "downloading"
@@ -32,29 +39,32 @@ class DatasetPart(BaseModel, frozen=True):
     download_url: str
 
 
-class PrideDatasetRequest(BaseModel):
-    """Request body for creating a dataset from a PRIDE project."""
+class RepoDatasetRequest(BaseModel):
+    """Request body for creating a dataset from a repository project."""
 
     filenames: list[str] | None = None
 
 
-class PrideImportJob(BaseModel):
-    """Status of a single PRIDE file import job."""
+class RepoImportJob(BaseModel):
+    """Status of a single repository file import job."""
 
-    status: PrideImportStatus
-    pride_file_name: str | None = None
+    status: RepoImportStatus
+    source: RepoSource | None = None
+    file_name: str | None = None
     job_id: str | None = None
+    dataset_id: str | None = None
     error_message: str | None = None
 
 
-class PrideDatasetResponse(BaseModel):
-    """Response from the PRIDE dataset creation endpoint."""
+class RepoDatasetResponse(BaseModel):
+    """Response from the repository dataset creation endpoint."""
 
     dataset_id: str
     dataset_name: str
+    source: RepoSource
     accession: str
     total_files: int
-    jobs: list[PrideImportJob]
+    jobs: list[RepoImportJob]
 
 
 class Manifest(BaseModel):

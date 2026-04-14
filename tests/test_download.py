@@ -12,7 +12,7 @@ from msdatasets.download import (
     download_part,
     load_dataset,
 )
-from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError
 from msdatasets.models import Dataset, DatasetPart, Manifest
 
 # Sample manifest dictionary for testing
@@ -451,9 +451,7 @@ class TestLoadDataset:
         fake_module.MSCompressDataset = mock_msc_cls
 
         with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
-            result = load_dataset(
-                "abc-123", force_download=True, show_progress=False
-            )
+            result = load_dataset("abc-123", force_download=True, show_progress=False)
 
         mock_download.assert_called_once_with(
             "abc-123",
