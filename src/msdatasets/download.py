@@ -54,6 +54,24 @@ _REPO_PATTERN = re.compile(
 )
 
 
+def _parse_repo_spec(
+    dataset_id: str,
+) -> tuple[RepoSource, str, list[str] | None] | None:
+    """Parse a ``{source}/{accession}[files]`` spec.
+
+    Returns ``(source, accession, filenames)`` if *dataset_id* matches the
+    repository pattern, otherwise ``None``.
+    """
+    match = _REPO_PATTERN.match(dataset_id)
+    if not match:
+        return None
+    source = RepoSource(match.group("source"))
+    accession = match.group("accession")
+    files_group = match.group("files")
+    filenames = [f.strip() for f in files_group.split(",")] if files_group else None
+    return source, accession, filenames
+
+
 def _import_torch_dataset() -> type[MSCompressDataset]:
     """Import MSCompressDataset, raising a helpful error if torch is missing."""
     try:
@@ -235,7 +253,7 @@ def download_dataset(
     return ds
 
 
-def load_repo_dataset(
+def download_repo_dataset(
     source: RepoSource | str,
     accession: str,
     *,
@@ -243,8 +261,8 @@ def load_repo_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
-) -> MSCompressDataset:
-    """Trigger a repository import and return an :class:`MSCompressDataset` once ready.
+) -> Dataset:
+    """Trigger a repository import and download the resulting dataset.
 
     Posts to ``/repositories/{source}/projects/{accession}/dataset`` to create
     a dataset from a PRIDE or MassIVE project.  The endpoint is
@@ -269,7 +287,6 @@ def load_repo_dataset(
         Maximum number of parallel downloads.
     """
     source = RepoSource(source)
-    dataset_cls = _import_torch_dataset()
     console = Console(stderr=True)
 
     async def _import() -> str:
@@ -300,12 +317,38 @@ def load_repo_dataset(
 
     dataset_id = asyncio.run(_import())
 
-    ds = download_dataset(
+    return download_dataset(
         dataset_id,
         force_download=force_download,
         show_progress=show_progress,
         max_workers=max_workers,
         filenames=filenames,
+    )
+
+
+def load_repo_dataset(
+    source: RepoSource | str,
+    accession: str,
+    *,
+    filenames: list[str] | None = None,
+    force_download: bool = False,
+    show_progress: bool = True,
+    max_workers: int = 4,
+) -> MSCompressDataset:
+    """Trigger a repository import and return an :class:`MSCompressDataset` once ready.
+
+    Convenience wrapper around :func:`download_repo_dataset` that loads the
+    downloaded files into an :class:`mscompress.datasets.torch.MSCompressDataset`.
+    Requires PyTorch to be installed.
+    """
+    dataset_cls = _import_torch_dataset()
+    ds = download_repo_dataset(
+        source,
+        accession,
+        filenames=filenames,
+        force_download=force_download,
+        show_progress=show_progress,
+        max_workers=max_workers,
     )
     return dataset_cls(ds.cache_dir)
 
@@ -340,12 +383,9 @@ def load_dataset(
     max_workers:
         Maximum number of parallel downloads.
     """
-    match = _REPO_PATTERN.match(dataset_id)
-    if match:
-        source = RepoSource(match.group("source"))
-        accession = match.group("accession")
-        files_group = match.group("files")
-        filenames = [f.strip() for f in files_group.split(",")] if files_group else None
+    repo_spec = _parse_repo_spec(dataset_id)
+    if repo_spec is not None:
+        source, accession, filenames = repo_spec
         return load_repo_dataset(
             source,
             accession,

@@ -10,9 +10,11 @@ from msdatasets.client import ensure_extracted, fetch_manifest
 from msdatasets.download import (
     _import_torch_dataset,
     _NullContext,
+    _parse_repo_spec,
     _RichBatchProgress,
     download_dataset,
     download_part,
+    download_repo_dataset,
     load_dataset,
     load_repo_dataset,
 )
@@ -575,6 +577,68 @@ def _repo_response(dataset_id="ds-xyz"):
             )
         ],
     )
+
+
+class TestParseRepoSpec:
+    """Tests for the repo-spec regex parser."""
+
+    def test_pride_accession(self):
+        assert _parse_repo_spec("pride/PXD075509") == (
+            RepoSource.PRIDE,
+            "PXD075509",
+            None,
+        )
+
+    def test_massive_accession_with_files(self):
+        assert _parse_repo_spec("massive/MSV000101460[a.raw, b.raw]") == (
+            RepoSource.MASSIVE,
+            "MSV000101460",
+            ["a.raw", "b.raw"],
+        )
+
+    def test_uuid_returns_none(self):
+        assert _parse_repo_spec("550e8400-e29b-41d4-a716-446655440000") is None
+
+    def test_unknown_source_returns_none(self):
+        assert _parse_repo_spec("unknown-source/ABC123") is None
+
+
+class TestDownloadRepoDataset:
+    """Tests for download_repo_dataset (repo import → Dataset, no torch)."""
+
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_triggers_import_and_downloads(self, mock_trigger, mock_download, tmp_path):
+        mock_trigger.return_value = _repo_response("ds-xyz")
+        expected = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name="Repo",
+            cache_dir=tmp_path,
+            files=[tmp_path / "a.raw"],
+        )
+        mock_download.return_value = expected
+
+        result = download_repo_dataset(
+            "pride",
+            "PXD000001",
+            filenames=["a.raw"],
+            show_progress=False,
+        )
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        assert kwargs["filenames"] == ["a.raw"]
+        # No on_status in the no-progress branch.
+        assert "on_status" not in kwargs
+
+        mock_download.assert_called_once_with(
+            "ds-xyz",
+            force_download=False,
+            show_progress=False,
+            max_workers=4,
+            filenames=["a.raw"],
+        )
+        assert result is expected
 
 
 class TestLoadRepoDataset:
