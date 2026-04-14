@@ -65,6 +65,7 @@ packages = ["src/msdatasets"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "--cov=msdatasets --cov-branch --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 88
@@ -97,3 +98,5 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
 ]
+fail_under = 90
+show_missing = true

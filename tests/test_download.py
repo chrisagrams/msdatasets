@@ -8,12 +8,24 @@ import pytest
 
 from msdatasets.client import ensure_extracted, fetch_manifest
 from msdatasets.download import (
+    _import_torch_dataset,
+    _NullContext,
+    _RichBatchProgress,
     download_dataset,
     download_part,
     load_dataset,
+    load_repo_dataset,
 )
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError
-from msdatasets.models import Dataset, DatasetPart, Manifest
+from msdatasets.models import (
+    Dataset,
+    DatasetPart,
+    Manifest,
+    RepoDatasetResponse,
+    RepoImportJob,
+    RepoImportStatus,
+    RepoSource,
+)
 
 # Sample manifest dictionary for testing
 SAMPLE_MANIFEST_DICT = {
@@ -461,3 +473,233 @@ class TestLoadDataset:
         )
         mock_msc_cls.assert_called_once_with("/tmp/ds")
         assert result is sentinel
+
+
+class TestImportTorchDataset:
+    """Tests for the lazy torch import helper."""
+
+    def test_success_returns_class(self):
+        fake_cls = MagicMock()
+        fake_module = ModuleType("mscompress.datasets.torch")
+        fake_module.MSCompressDataset = fake_cls
+        with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
+            assert _import_torch_dataset() is fake_cls
+
+    def test_missing_torch_raises_helpful_import_error(self):
+        real_import = (
+            __builtins__["__import__"]
+            if isinstance(__builtins__, dict)
+            else __builtins__.__import__
+        )
+
+        def fake_import(name, *args, **kwargs):
+            if name == "mscompress.datasets.torch":
+                raise ImportError("No module named 'torch'")
+            return real_import(name, *args, **kwargs)
+
+        # Drop any already-cached reference so the import actually runs.
+        with patch.dict(sys.modules, {}, clear=False):
+            sys.modules.pop("mscompress.datasets.torch", None)
+            with patch("builtins.__import__", side_effect=fake_import):
+                with pytest.raises(ImportError, match="torch"):
+                    _import_torch_dataset()
+
+
+class TestRichBatchProgress:
+    """Tests for the mstransfer progress adapter."""
+
+    def test_file_lifecycle(self):
+        progress = MagicMock()
+        progress.add_task.return_value = "task-id-1"
+        adapter = _RichBatchProgress(progress)
+
+        adapter.on_file_start("a.raw", 1000)
+        progress.add_task.assert_called_once_with("a.raw", total=1000)
+
+        adapter.on_file_progress("a.raw", 250)
+        progress.update.assert_called_once_with("task-id-1", advance=250)
+
+        # on_file_complete is a no-op but must not raise.
+        adapter.on_file_complete("a.raw")
+
+    def test_progress_update_for_unknown_file_is_noop(self):
+        progress = MagicMock()
+        adapter = _RichBatchProgress(progress)
+        adapter.on_file_progress("unknown.raw", 100)
+        progress.update.assert_not_called()
+
+    def test_error_sets_red_description(self):
+        progress = MagicMock()
+        progress.add_task.return_value = "task-id-1"
+        adapter = _RichBatchProgress(progress)
+
+        adapter.on_file_start("a.raw", 500)
+        adapter.on_file_error("a.raw", RuntimeError("network"))
+        progress.update.assert_called_with(
+            "task-id-1", description="[red]a.raw (error)"
+        )
+
+    def test_error_for_unknown_file_is_noop(self):
+        progress = MagicMock()
+        adapter = _RichBatchProgress(progress)
+        adapter.on_file_error("nope.raw", RuntimeError("x"))
+        progress.update.assert_not_called()
+
+
+class TestNullContext:
+    """Tests for the tiny Python 3.10 compat context manager."""
+
+    def test_enter_returns_self(self):
+        ctx = _NullContext()
+        assert ctx.__enter__() is ctx
+
+    def test_works_as_context_manager(self):
+        with _NullContext() as ctx:
+            assert isinstance(ctx, _NullContext)
+
+
+def _repo_response(dataset_id="ds-xyz"):
+    return RepoDatasetResponse(
+        dataset_id=dataset_id,
+        dataset_name="Repo Dataset",
+        source=RepoSource.PRIDE,
+        accession="PXD000001",
+        total_files=1,
+        jobs=[
+            RepoImportJob(
+                status=RepoImportStatus.COMPLETE,
+                source=RepoSource.PRIDE,
+                file_name="a.raw",
+                job_id="j0",
+                dataset_id=dataset_id,
+            )
+        ],
+    )
+
+
+class TestLoadRepoDataset:
+    """Tests for load_repo_dataset (repo → MSCompressDataset pipeline)."""
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_with_progress_uses_spinner(
+        self, mock_trigger, mock_download, mock_import, tmp_path
+    ):
+        mock_trigger.return_value = _repo_response("ds-xyz")
+        mock_download.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name="Repo Dataset",
+            cache_dir=tmp_path,
+            files=[tmp_path / "a.raw"],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+
+        result = load_repo_dataset(
+            "pride",
+            "PXD000001",
+            filenames=["a.raw"],
+            show_progress=True,
+        )
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        assert kwargs["filenames"] == ["a.raw"]
+        assert kwargs["on_status"] is not None
+
+        # Exercise the on_status callback (covers the inner function body).
+        on_status = kwargs["on_status"]
+        on_status("a.raw", RepoImportStatus.DOWNLOADING)
+        on_status("a.raw", RepoImportStatus.COMPLETE)
+        # Also an unknown status to hit the fallback label path.
+        on_status("a.raw", RepoImportStatus.FAILED)
+
+        mock_download.assert_called_once_with(
+            "ds-xyz",
+            force_download=False,
+            show_progress=True,
+            max_workers=4,
+            filenames=["a.raw"],
+        )
+        assert result == "wrapped"
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_without_progress_skips_spinner(
+        self, mock_trigger, mock_download, mock_import, tmp_path
+    ):
+        mock_trigger.return_value = _repo_response()
+        mock_download.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+
+        load_repo_dataset(RepoSource.PRIDE, "PXD000001", show_progress=False)
+
+        kwargs = mock_trigger.call_args.kwargs
+        # No on_status callback in the no-progress branch.
+        assert "on_status" not in kwargs
+
+
+class TestLoadDatasetRouting:
+    """Tests for the load_dataset regex-based dispatcher."""
+
+    @patch("msdatasets.download.load_repo_dataset")
+    def test_pride_accession_dispatches_to_repo(self, mock_repo):
+        mock_repo.return_value = "wrapped"
+        load_dataset("pride/PXD075509")
+        mock_repo.assert_called_once()
+        kwargs = mock_repo.call_args.kwargs
+        args = mock_repo.call_args.args
+        assert args[0] == RepoSource.PRIDE
+        assert args[1] == "PXD075509"
+        assert kwargs["filenames"] is None
+
+    @patch("msdatasets.download.load_repo_dataset")
+    def test_massive_accession_with_filenames(self, mock_repo):
+        mock_repo.return_value = "wrapped"
+        load_dataset("massive/MSV000078787[a.raw, b.mzML, c.raw]")
+        args = mock_repo.call_args.args
+        kwargs = mock_repo.call_args.kwargs
+        assert args[0] == RepoSource.MASSIVE
+        assert args[1] == "MSV000078787"
+        assert kwargs["filenames"] == ["a.raw", "b.mzML", "c.raw"]
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    def test_uuid_falls_through_to_download_dataset(
+        self, mock_download, mock_import, tmp_path
+    ):
+        mock_download.return_value = Dataset(
+            dataset_id="uuid-1",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        cls = MagicMock(return_value="wrapped")
+        mock_import.return_value = cls
+        result = load_dataset("550e8400-e29b-41d4-a716-446655440000")
+        mock_download.assert_called_once()
+        cls.assert_called_once_with(tmp_path)
+        assert result == "wrapped"
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    def test_non_matching_specifier_falls_through(
+        self, mock_download, mock_import, tmp_path
+    ):
+        # Looks like a repo spec but source is unsupported → falls through
+        # as a plain dataset_id.
+        mock_download.return_value = Dataset(
+            dataset_id="foo",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+        load_dataset("unknown-source/ABC123")
+        mock_download.assert_called_once()
