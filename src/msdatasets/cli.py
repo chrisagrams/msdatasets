@@ -6,6 +6,11 @@ import argparse
 import logging
 import sys
 
+from rich.console import Console
+
+from msdatasets.download import download_dataset
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``msdatasets`` CLI."""
@@ -78,11 +83,6 @@ def _configure_logging(verbosity: int) -> None:
 
 def _cmd_download(args: argparse.Namespace) -> int:
     """Handle the ``download`` subcommand."""
-    from rich.console import Console
-
-    from msdatasets.download import download_dataset
-    from msdatasets.exceptions import DatasetNotFoundError, DownloadError
-
     console = Console(stderr=True)
 
     try:

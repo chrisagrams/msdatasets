@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import TypeVar
@@ -132,8 +133,6 @@ async def ensure_all_extracted(
     parts: list[DatasetPart],
 ) -> None:
     """Ensure all parts are extracted, concurrently."""
-    import asyncio
-
     await asyncio.gather(*(ensure_extracted(client, part) for part in parts))
 
 
