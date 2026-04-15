@@ -1,10 +1,24 @@
 """Tests for msdatasets.cli."""
 
+import logging
 from unittest.mock import patch
 
-from msdatasets.cli import main
+import pytest
+
+from msdatasets.cli import _configure_logging, main
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError
-from msdatasets.models import Dataset
+from msdatasets.models import Dataset, RepoSource
+
+
+@pytest.fixture(autouse=True)
+def _reset_msdatasets_logger():
+    """Remove handlers added by _configure_logging so tests stay isolated."""
+    logger = logging.getLogger("msdatasets")
+    original_handlers = list(logger.handlers)
+    original_level = logger.level
+    yield
+    logger.handlers = original_handlers
+    logger.setLevel(original_level)
 
 
 class TestMain:
@@ -29,7 +43,7 @@ class TestDownloadCommand:
     Tests for the download command.
     """
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_success(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -44,7 +58,7 @@ class TestDownloadCommand:
             "abc", force_download=False, show_progress=True, max_workers=4
         )
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_force_flag(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -58,7 +72,7 @@ class TestDownloadCommand:
             "abc", force_download=True, show_progress=True, max_workers=4
         )
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_no_progress_flag(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc",
@@ -72,21 +86,21 @@ class TestDownloadCommand:
             "abc", force_download=False, show_progress=False, max_workers=4
         )
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_not_found_returns_1(self, mock_load):
         mock_load.side_effect = DatasetNotFoundError("not found")
 
         result = main(["download", "bad-id"])
         assert result == 1
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_download_error_returns_1(self, mock_load):
         mock_load.side_effect = DownloadError("server error")
 
         result = main(["download", "some-id"])
         assert result == 1
 
-    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.cli.download_dataset")
     def test_fallback_to_dataset_id_when_no_name(self, mock_load, tmp_path):
         mock_load.return_value = Dataset(
             dataset_id="abc-123",
@@ -97,3 +111,95 @@ class TestDownloadCommand:
 
         result = main(["download", "abc-123"])
         assert result == 0
+
+
+class TestDownloadRepoSpec:
+    """Tests for CLI dispatch on repository specs (pride/MSV...)."""
+
+    @patch("msdatasets.cli.download_repo_dataset")
+    @patch("msdatasets.cli.download_dataset")
+    def test_pride_accession_dispatches_to_repo(
+        self, mock_download, mock_repo, tmp_path
+    ):
+        mock_repo.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name="Repo",
+            cache_dir=tmp_path,
+            files=[],
+        )
+        result = main(["download", "pride/PXD075509"])
+        assert result == 0
+        mock_download.assert_not_called()
+        mock_repo.assert_called_once_with(
+            RepoSource.PRIDE,
+            "PXD075509",
+            filenames=None,
+            force_download=False,
+            show_progress=True,
+            max_workers=4,
+        )
+
+    @patch("msdatasets.cli.download_repo_dataset")
+    def test_massive_accession_with_filenames(self, mock_repo, tmp_path):
+        mock_repo.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        main(["download", "massive/MSV000101460[a.raw, b.raw]"])
+        mock_repo.assert_called_once_with(
+            RepoSource.MASSIVE,
+            "MSV000101460",
+            filenames=["a.raw", "b.raw"],
+            force_download=False,
+            show_progress=True,
+            max_workers=4,
+        )
+
+    @patch("msdatasets.cli.download_repo_dataset")
+    def test_repo_not_found_returns_1(self, mock_repo):
+        mock_repo.side_effect = DatasetNotFoundError("nope")
+        assert main(["download", "pride/PXD999999"]) == 1
+
+    @patch("msdatasets.cli.download_repo_dataset")
+    def test_repo_download_error_returns_1(self, mock_repo):
+        mock_repo.side_effect = DownloadError("boom")
+        assert main(["download", "pride/PXD075509"]) == 1
+
+
+class TestConfigureLogging:
+    """Tests for _configure_logging verbosity → log-level mapping."""
+
+    def test_verbosity_zero_is_warning(self):
+        _configure_logging(0)
+        logger = logging.getLogger("msdatasets")
+        assert logger.level == logging.WARNING
+        assert len(logger.handlers) >= 1
+
+    def test_verbosity_one_is_info(self):
+        _configure_logging(1)
+        assert logging.getLogger("msdatasets").level == logging.INFO
+
+    def test_verbosity_two_is_debug(self):
+        _configure_logging(2)
+        assert logging.getLogger("msdatasets").level == logging.DEBUG
+
+    def test_verbosity_above_two_is_debug(self):
+        _configure_logging(5)
+        assert logging.getLogger("msdatasets").level == logging.DEBUG
+
+
+class TestMainVerboseFlag:
+    """End-to-end: -v flag wires through to the logger."""
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_verbose_flag_sets_info(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        main(["-v", "download", "abc"])
+        assert logging.getLogger("msdatasets").level == logging.INFO

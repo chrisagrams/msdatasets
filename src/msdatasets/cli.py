@@ -6,6 +6,15 @@ import argparse
 import logging
 import sys
 
+from rich.console import Console
+
+from msdatasets.download import (
+    _parse_repo_spec,
+    download_dataset,
+    download_repo_dataset,
+)
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the ``msdatasets`` CLI."""
@@ -24,7 +33,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- download subcommand ---
     dl_parser = subparsers.add_parser("download", help="Download a dataset by ID")
-    dl_parser.add_argument("dataset_id", help="The dataset identifier (UUID)")
+    dl_parser.add_argument(
+        "dataset_id",
+        help=(
+            "Dataset identifier: a UUID, or a repository spec like "
+            "'pride/PXD075509' or 'massive/MSV000101460[file1.raw,file2.raw]'"
+        ),
+    )
     dl_parser.add_argument(
         "--force",
         action="store_true",
@@ -78,20 +93,28 @@ def _configure_logging(verbosity: int) -> None:
 
 def _cmd_download(args: argparse.Namespace) -> int:
     """Handle the ``download`` subcommand."""
-    from rich.console import Console
-
-    from msdatasets.download import download_dataset
-    from msdatasets.exceptions import DatasetNotFoundError, DownloadError
-
     console = Console(stderr=True)
 
+    repo_spec = _parse_repo_spec(args.dataset_id)
+
     try:
-        ds = download_dataset(
-            args.dataset_id,
-            force_download=args.force,
-            show_progress=not args.no_progress,
-            max_workers=args.workers,
-        )
+        if repo_spec is not None:
+            source, accession, filenames = repo_spec
+            ds = download_repo_dataset(
+                source,
+                accession,
+                filenames=filenames,
+                force_download=args.force,
+                show_progress=not args.no_progress,
+                max_workers=args.workers,
+            )
+        else:
+            ds = download_dataset(
+                args.dataset_id,
+                force_download=args.force,
+                show_progress=not args.no_progress,
+                max_workers=args.workers,
+            )
     except DatasetNotFoundError:
         console.print(f"[bold red]Error:[/] Dataset not found: {args.dataset_id}")
         return 1

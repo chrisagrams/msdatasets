@@ -1,21 +1,33 @@
-"""Tests for msdatasets.download."""
+"""Tests for msdatasets.download and msdatasets.client."""
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from msdatasets.client import ensure_extracted, fetch_manifest
 from msdatasets.download import (
-    _ensure_extracted,
-    _poll_task,
+    _import_torch_dataset,
+    _NullContext,
+    _parse_repo_spec,
+    _RichBatchProgress,
     download_dataset,
     download_part,
-    fetch_manifest,
+    download_repo_dataset,
     load_dataset,
+    load_repo_dataset,
 )
-from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
-from msdatasets.models import Dataset, DatasetPart, Manifest
+from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+from msdatasets.models import (
+    Dataset,
+    DatasetPart,
+    Manifest,
+    RepoDatasetResponse,
+    RepoImportJob,
+    RepoImportStatus,
+    RepoSource,
+)
 
 # Sample manifest dictionary for testing
 SAMPLE_MANIFEST_DICT = {
@@ -61,7 +73,7 @@ class TestManifest:
     """Tests for the Manifest model."""
 
     def test_from_dict(self):
-        m = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        m = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         assert m.dataset_id == "550e8400-e29b-41d4-a716-446655440000"
         assert m.dataset_name == "Test Dataset"
         assert m.total_parts == 2
@@ -69,11 +81,11 @@ class TestManifest:
 
     def test_from_dict_null_name(self):
         data = {**SAMPLE_MANIFEST_DICT, "dataset_name": None}
-        m = Manifest.from_dict(data)
+        m = Manifest.model_validate(data)
         assert m.dataset_name is None
 
     def test_parts_are_datasetpart(self):
-        m = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        m = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         p = m.parts[0]
         assert isinstance(p, DatasetPart)
         assert p.part_index == 0
@@ -120,117 +132,65 @@ class TestDataset:
 class TestFetchManifest:
     """Tests for the fetch_manifest function."""
 
-    def test_success(self):
+    @pytest.mark.asyncio
+    async def test_success(self):
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = SAMPLE_MANIFEST_DICT
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
-        m = fetch_manifest("550e8400", client=mock_client)
+        m = await fetch_manifest("550e8400", client=mock_client)
         assert m.dataset_id == "550e8400-e29b-41d4-a716-446655440000"
         assert len(m.parts) == 2
 
-    def test_404_raises_not_found(self):
+    @pytest.mark.asyncio
+    async def test_404_raises_not_found(self):
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         with pytest.raises(DatasetNotFoundError, match="not found"):
-            fetch_manifest("bad-id", client=mock_client)
+            await fetch_manifest("bad-id", client=mock_client)
 
-    def test_500_raises_download_error(self):
+    @pytest.mark.asyncio
+    async def test_500_raises_download_error(self):
         mock_response = MagicMock()
         mock_response.status_code = 500
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         with pytest.raises(DownloadError, match="500"):
-            fetch_manifest("some-id", client=mock_client)
-
-
-class TestPollTask:
-    """Tests for _poll_task."""
-
-    def test_complete_immediately(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"task_id": "t1", "state": "complete"}
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        _poll_task(mock_client, "t1")  # Should return without error
-
-    def test_failed_raises_extraction_error(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "task_id": "t1",
-            "state": "failed",
-            "error": "out of memory",
-        }
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(ExtractionError, match="out of memory"):
-            _poll_task(mock_client, "t1")
-
-    @patch("msdatasets.download.time.sleep")
-    def test_polls_until_complete(self, mock_sleep):
-        processing = MagicMock()
-        processing.status_code = 200
-        processing.json.return_value = {"task_id": "t1", "state": "processing"}
-
-        complete = MagicMock()
-        complete.status_code = 200
-        complete.json.return_value = {"task_id": "t1", "state": "complete"}
-
-        mock_client = MagicMock()
-        mock_client.get.side_effect = [processing, processing, complete]
-
-        _poll_task(mock_client, "t1")
-
-        assert mock_client.get.call_count == 3
-        assert mock_sleep.call_count == 2
-
-    def test_server_error_raises(self):
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-
-        mock_client = MagicMock()
-        mock_client.get.return_value = mock_response
-
-        with pytest.raises(DownloadError, match="500"):
-            _poll_task(mock_client, "t1")
+            await fetch_manifest("some-id", client=mock_client)
 
 
 class TestEnsureExtracted:
-    """Tests for _ensure_extracted."""
+    """Tests for ensure_extracted."""
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_204_already_cached(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_204_already_cached(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 204
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
-        _ensure_extracted(mock_client, part)  # Should return without error
+        await ensure_extracted(mock_client, part)  # Should return without error
 
         mock_client.get.assert_called_once_with(
             "https://api.example.com/datasets/x/parts/aaa"
         )
 
-    @patch("msdatasets.download._poll_task")
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_202_triggers_polling(self, mock_api_url, mock_poll):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.stream_task", new_callable=AsyncMock)
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_202_streams_task(self, mock_api_url, mock_stream):
         mock_response = MagicMock()
         mock_response.status_code = 202
         mock_response.json.return_value = {
@@ -238,44 +198,46 @@ class TestEnsureExtracted:
             "status_url": "/tasks/task-123",
         }
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
-        _ensure_extracted(mock_client, part)
+        await ensure_extracted(mock_client, part)
 
-        mock_poll.assert_called_once_with(mock_client, "task-123")
+        mock_stream.assert_called_once_with(mock_client, "task-123")
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_404_raises(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_404_raises(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 404
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
         with pytest.raises(DownloadError, match="not found"):
-            _ensure_extracted(mock_client, part)
+            await ensure_extracted(mock_client, part)
 
-    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    def test_500_raises(self, mock_api_url):
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_500_raises(self, mock_api_url):
         mock_response = MagicMock()
         mock_response.status_code = 500
 
-        mock_client = MagicMock()
+        mock_client = AsyncMock()
         mock_client.get.return_value = mock_response
 
         part = _make_part()
         with pytest.raises(DownloadError, match="500"):
-            _ensure_extracted(mock_client, part)
+            await ensure_extracted(mock_client, part)
 
 
 class TestDownloadPart:
     """Tests for the download_part function."""
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_downloads_file(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -294,7 +256,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_passes_skip_existing(
         self, mock_dl_file, mock_ensure, mock_api_url, tmp_path
@@ -312,7 +274,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_passes_force(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -328,7 +290,7 @@ class TestDownloadPart:
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_file")
     def test_creates_dest_dir(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
         part = _make_part()
@@ -345,15 +307,15 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_downloads_all_parts(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         mock_batch.return_value = [
@@ -365,8 +327,8 @@ class TestDownloadDataset:
 
         assert len(ds) == 2
         assert ds.dataset_name == "Test Dataset"
-        # Extraction should have been triggered for both parts
-        assert mock_ensure.call_count == 2
+        # Extraction should have been triggered
+        mock_ensure.assert_called_once()
         # Downloads go through mstransfer
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
@@ -378,8 +340,8 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_skips_existing_files(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -387,7 +349,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         # Pre-create one file
@@ -398,8 +360,8 @@ class TestDownloadDataset:
         ds = download_dataset("550e8400", show_progress=False)
 
         assert len(ds) == 2
-        # Only the missing part should trigger extraction and download
-        assert mock_ensure.call_count == 1
+        # Extraction should have been triggered for the missing part
+        mock_ensure.assert_called_once()
         mock_batch.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 1
@@ -407,8 +369,8 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_force_redownloads(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -416,7 +378,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         (ds_dir / "sample_01.mszx").write_bytes(b"existing")
@@ -430,13 +392,13 @@ class TestDownloadDataset:
 
         assert len(ds) == 2
         # Both parts should be extracted and requested despite one existing
-        assert mock_ensure.call_count == 2
+        mock_ensure.assert_called_once()
         requests = mock_batch.call_args[0][0]
         assert len(requests) == 2
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_all_cached_skips_download(
         self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
@@ -444,7 +406,7 @@ class TestDownloadDataset:
         ds_dir = tmp_path / "ds"
         ds_dir.mkdir()
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
         # Pre-create all files
@@ -458,15 +420,15 @@ class TestDownloadDataset:
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
     @patch("msdatasets.download.get_dataset_dir")
-    @patch("msdatasets.download.fetch_manifest")
-    @patch("msdatasets.download._ensure_extracted")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
     @patch("msdatasets.download.download_batch")
     def test_saves_manifest_json(
         self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
     ):
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
-        manifest = Manifest.from_dict(SAMPLE_MANIFEST_DICT)
+        manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
         mock_batch.return_value = [
             ds_dir / "sample_01.mszx",
@@ -503,9 +465,7 @@ class TestLoadDataset:
         fake_module.MSCompressDataset = mock_msc_cls
 
         with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
-            result = load_dataset(
-                "abc-123", force_download=True, show_progress=False
-            )
+            result = load_dataset("abc-123", force_download=True, show_progress=False)
 
         mock_download.assert_called_once_with(
             "abc-123",
@@ -515,3 +475,295 @@ class TestLoadDataset:
         )
         mock_msc_cls.assert_called_once_with("/tmp/ds")
         assert result is sentinel
+
+
+class TestImportTorchDataset:
+    """Tests for the lazy torch import helper."""
+
+    def test_success_returns_class(self):
+        fake_cls = MagicMock()
+        fake_module = ModuleType("mscompress.datasets.torch")
+        fake_module.MSCompressDataset = fake_cls
+        with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
+            assert _import_torch_dataset() is fake_cls
+
+    def test_missing_torch_raises_helpful_import_error(self):
+        real_import = (
+            __builtins__["__import__"]
+            if isinstance(__builtins__, dict)
+            else __builtins__.__import__
+        )
+
+        def fake_import(name, *args, **kwargs):
+            if name == "mscompress.datasets.torch":
+                raise ImportError("No module named 'torch'")
+            return real_import(name, *args, **kwargs)
+
+        # Drop any already-cached reference so the import actually runs.
+        with patch.dict(sys.modules, {}, clear=False):
+            sys.modules.pop("mscompress.datasets.torch", None)
+            with patch("builtins.__import__", side_effect=fake_import):
+                with pytest.raises(ImportError, match="torch"):
+                    _import_torch_dataset()
+
+
+class TestRichBatchProgress:
+    """Tests for the mstransfer progress adapter."""
+
+    def test_file_lifecycle(self):
+        progress = MagicMock()
+        progress.add_task.return_value = "task-id-1"
+        adapter = _RichBatchProgress(progress)
+
+        adapter.on_file_start("a.raw", 1000)
+        progress.add_task.assert_called_once_with("a.raw", total=1000)
+
+        adapter.on_file_progress("a.raw", 250)
+        progress.update.assert_called_once_with("task-id-1", advance=250)
+
+        # on_file_complete is a no-op but must not raise.
+        adapter.on_file_complete("a.raw")
+
+    def test_progress_update_for_unknown_file_is_noop(self):
+        progress = MagicMock()
+        adapter = _RichBatchProgress(progress)
+        adapter.on_file_progress("unknown.raw", 100)
+        progress.update.assert_not_called()
+
+    def test_error_sets_red_description(self):
+        progress = MagicMock()
+        progress.add_task.return_value = "task-id-1"
+        adapter = _RichBatchProgress(progress)
+
+        adapter.on_file_start("a.raw", 500)
+        adapter.on_file_error("a.raw", RuntimeError("network"))
+        progress.update.assert_called_with(
+            "task-id-1", description="[red]a.raw (error)"
+        )
+
+    def test_error_for_unknown_file_is_noop(self):
+        progress = MagicMock()
+        adapter = _RichBatchProgress(progress)
+        adapter.on_file_error("nope.raw", RuntimeError("x"))
+        progress.update.assert_not_called()
+
+
+class TestNullContext:
+    """Tests for the tiny Python 3.10 compat context manager."""
+
+    def test_enter_returns_self(self):
+        ctx = _NullContext()
+        assert ctx.__enter__() is ctx
+
+    def test_works_as_context_manager(self):
+        with _NullContext() as ctx:
+            assert isinstance(ctx, _NullContext)
+
+
+def _repo_response(dataset_id="ds-xyz"):
+    return RepoDatasetResponse(
+        dataset_id=dataset_id,
+        dataset_name="Repo Dataset",
+        source=RepoSource.PRIDE,
+        accession="PXD000001",
+        total_files=1,
+        jobs=[
+            RepoImportJob(
+                status=RepoImportStatus.COMPLETE,
+                source=RepoSource.PRIDE,
+                file_name="a.raw",
+                job_id="j0",
+                dataset_id=dataset_id,
+            )
+        ],
+    )
+
+
+class TestParseRepoSpec:
+    """Tests for the repo-spec regex parser."""
+
+    def test_pride_accession(self):
+        assert _parse_repo_spec("pride/PXD075509") == (
+            RepoSource.PRIDE,
+            "PXD075509",
+            None,
+        )
+
+    def test_massive_accession_with_files(self):
+        assert _parse_repo_spec("massive/MSV000101460[a.raw, b.raw]") == (
+            RepoSource.MASSIVE,
+            "MSV000101460",
+            ["a.raw", "b.raw"],
+        )
+
+    def test_uuid_returns_none(self):
+        assert _parse_repo_spec("550e8400-e29b-41d4-a716-446655440000") is None
+
+    def test_unknown_source_returns_none(self):
+        assert _parse_repo_spec("unknown-source/ABC123") is None
+
+
+class TestDownloadRepoDataset:
+    """Tests for download_repo_dataset (repo import → Dataset, no torch)."""
+
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_triggers_import_and_downloads(self, mock_trigger, mock_download, tmp_path):
+        mock_trigger.return_value = _repo_response("ds-xyz")
+        expected = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name="Repo",
+            cache_dir=tmp_path,
+            files=[tmp_path / "a.raw"],
+        )
+        mock_download.return_value = expected
+
+        result = download_repo_dataset(
+            "pride",
+            "PXD000001",
+            filenames=["a.raw"],
+            show_progress=False,
+        )
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        assert kwargs["filenames"] == ["a.raw"]
+        # No on_status in the no-progress branch.
+        assert "on_status" not in kwargs
+
+        mock_download.assert_called_once_with(
+            "ds-xyz",
+            force_download=False,
+            show_progress=False,
+            max_workers=4,
+            filenames=["a.raw"],
+        )
+        assert result is expected
+
+
+class TestLoadRepoDataset:
+    """Tests for load_repo_dataset (repo → MSCompressDataset pipeline)."""
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_with_progress_uses_spinner(
+        self, mock_trigger, mock_download, mock_import, tmp_path
+    ):
+        mock_trigger.return_value = _repo_response("ds-xyz")
+        mock_download.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name="Repo Dataset",
+            cache_dir=tmp_path,
+            files=[tmp_path / "a.raw"],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+
+        result = load_repo_dataset(
+            "pride",
+            "PXD000001",
+            filenames=["a.raw"],
+            show_progress=True,
+        )
+
+        mock_trigger.assert_called_once()
+        kwargs = mock_trigger.call_args.kwargs
+        assert kwargs["filenames"] == ["a.raw"]
+        assert kwargs["on_status"] is not None
+
+        # Exercise the on_status callback (covers the inner function body).
+        on_status = kwargs["on_status"]
+        on_status("a.raw", RepoImportStatus.DOWNLOADING)
+        on_status("a.raw", RepoImportStatus.COMPLETE)
+        # Also an unknown status to hit the fallback label path.
+        on_status("a.raw", RepoImportStatus.FAILED)
+
+        mock_download.assert_called_once_with(
+            "ds-xyz",
+            force_download=False,
+            show_progress=True,
+            max_workers=4,
+            filenames=["a.raw"],
+        )
+        assert result == "wrapped"
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_without_progress_skips_spinner(
+        self, mock_trigger, mock_download, mock_import, tmp_path
+    ):
+        mock_trigger.return_value = _repo_response()
+        mock_download.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+
+        load_repo_dataset(RepoSource.PRIDE, "PXD000001", show_progress=False)
+
+        kwargs = mock_trigger.call_args.kwargs
+        # No on_status callback in the no-progress branch.
+        assert "on_status" not in kwargs
+
+
+class TestLoadDatasetRouting:
+    """Tests for the load_dataset regex-based dispatcher."""
+
+    @patch("msdatasets.download.load_repo_dataset")
+    def test_pride_accession_dispatches_to_repo(self, mock_repo):
+        mock_repo.return_value = "wrapped"
+        load_dataset("pride/PXD075509")
+        mock_repo.assert_called_once()
+        kwargs = mock_repo.call_args.kwargs
+        args = mock_repo.call_args.args
+        assert args[0] == RepoSource.PRIDE
+        assert args[1] == "PXD075509"
+        assert kwargs["filenames"] is None
+
+    @patch("msdatasets.download.load_repo_dataset")
+    def test_massive_accession_with_filenames(self, mock_repo):
+        mock_repo.return_value = "wrapped"
+        load_dataset("massive/MSV000078787[a.raw, b.mzML, c.raw]")
+        args = mock_repo.call_args.args
+        kwargs = mock_repo.call_args.kwargs
+        assert args[0] == RepoSource.MASSIVE
+        assert args[1] == "MSV000078787"
+        assert kwargs["filenames"] == ["a.raw", "b.mzML", "c.raw"]
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    def test_uuid_falls_through_to_download_dataset(
+        self, mock_download, mock_import, tmp_path
+    ):
+        mock_download.return_value = Dataset(
+            dataset_id="uuid-1",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        cls = MagicMock(return_value="wrapped")
+        mock_import.return_value = cls
+        result = load_dataset("550e8400-e29b-41d4-a716-446655440000")
+        mock_download.assert_called_once()
+        cls.assert_called_once_with(tmp_path)
+        assert result == "wrapped"
+
+    @patch("msdatasets.download._import_torch_dataset")
+    @patch("msdatasets.download.download_dataset")
+    def test_non_matching_specifier_falls_through(
+        self, mock_download, mock_import, tmp_path
+    ):
+        # Looks like a repo spec but source is unsupported → falls through
+        # as a plain dataset_id.
+        mock_download.return_value = Dataset(
+            dataset_id="foo",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        mock_import.return_value = MagicMock(return_value="wrapped")
+        load_dataset("unknown-source/ABC123")
+        mock_download.assert_called_once()

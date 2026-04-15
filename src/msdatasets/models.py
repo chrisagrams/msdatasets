@@ -2,13 +2,33 @@
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Iterator
+
+from pydantic import BaseModel, ConfigDict
 
 
-@dataclass(frozen=True)
-class DatasetPart:
+class RepoSource(str, enum.Enum):
+    """Supported repository sources for dataset imports."""
+
+    PRIDE = "pride"
+    MASSIVE = "massive"
+
+
+class RepoImportStatus(str, enum.Enum):
+    """Status of a repository file import job."""
+
+    PENDING = "pending"
+    DOWNLOADING = "downloading"
+    CONVERTING = "converting"
+    INDEXING = "indexing"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class DatasetPart(BaseModel, frozen=True):
     """A single downloadable part of a dataset."""
 
     part_index: int
@@ -19,34 +39,75 @@ class DatasetPart:
     download_url: str
 
 
-@dataclass
-class Manifest:
+class RepoDatasetRequest(BaseModel):
+    """Request body for creating a dataset from a repository project."""
+
+    filenames: list[str] | None = None
+
+
+class RepoImportJob(BaseModel):
+    """Status of a single repository file import job."""
+
+    status: RepoImportStatus
+    source: RepoSource | None = None
+    file_name: str | None = None
+    job_id: str | None = None
+    dataset_id: str | None = None
+    error_message: str | None = None
+
+
+class RepoDatasetResponse(BaseModel):
+    """Response from the repository dataset creation endpoint."""
+
+    dataset_id: str
+    dataset_name: str
+    source: RepoSource
+    accession: str
+    total_files: int
+    jobs: list[RepoImportJob]
+
+
+class NotificationEvent(BaseModel):
+    """Base schema for a payload received over an SSE stream."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    def is_terminal(self) -> bool:
+        """Return ``True`` when this event represents a terminal state."""
+        return False
+
+
+class TaskEvent(NotificationEvent):
+    """SSE payload from ``/tasks/{task_id}/stream``."""
+
+    state: str
+    error: str | None = None
+
+    def is_terminal(self) -> bool:
+        return self.state in ("complete", "failed")
+
+
+class RepoImportEvent(NotificationEvent):
+    """SSE payload from ``/repositories/datasets/{dataset_id}/stream``."""
+
+    status: RepoImportStatus
+    job_id: str
+    source: RepoSource | None = None
+    file_name: str | None = None
+    dataset_id: str | None = None
+    error_message: str | None = None
+
+    def is_terminal(self) -> bool:
+        return self.status in (RepoImportStatus.COMPLETE, RepoImportStatus.FAILED)
+
+
+class Manifest(BaseModel):
     """Parsed server manifest describing available dataset parts."""
 
     dataset_id: str
-    dataset_name: str | None
+    dataset_name: str | None = None
     total_parts: int
     parts: list[DatasetPart]
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Manifest:
-        parts = [
-            DatasetPart(
-                part_index=p["part_index"],
-                item_id=p["item_id"],
-                filename=p["filename"],
-                num_indices=p["num_indices"],
-                extract_url=p["extract_url"],
-                download_url=p["download_url"],
-            )
-            for p in data["parts"]
-        ]
-        return cls(
-            dataset_id=data["dataset_id"],
-            dataset_name=data.get("dataset_name"),
-            total_parts=data["total_parts"],
-            parts=parts,
-        )
 
 
 @dataclass
