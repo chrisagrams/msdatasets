@@ -69,3 +69,6 @@ Thumbs.db
 
 # mkdocs
 site/
+
+# Examples
+examples/

@@ -4,6 +4,9 @@ site_url: https://chrisagrams.github.io/msdatasets
 repo_url: https://github.com/chrisagrams/msdatasets
 repo_name: chrisagrams/msdatasets
 
+watch:
+  - src
+
 theme:
   name: material
   palette:
@@ -34,10 +37,21 @@ plugins:
           options:
             show_source: true
             show_root_heading: true
+            docstring_style: numpy
+            docstring_section_style: table
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            filters: ["!^_"]
 
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
+  - Usage: usage.md
   - API Reference: api.md
 
 markdown_extensions:
