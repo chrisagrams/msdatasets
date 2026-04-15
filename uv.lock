@@ -1086,7 +1086,7 @@ wheels = [
 
 [[package]]
 name = "msdatasets"
-version = "0.1.1"
+version = "0.1.2"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -1127,7 +1127,7 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.24" },
     { name = "mscompress", specifier = ">=1.0.13" },
     { name = "msdatasets", extras = ["torch"], marker = "extra == 'all'" },
-    { name = "mstransfer", specifier = ">=0.2.2" },
+    { name = "mstransfer", specifier = ">=0.2.3" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.15" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pydantic", specifier = ">=2.0" },
@@ -1142,7 +1142,7 @@ provides-extras = ["dev", "torch", "all", "docs"]
 
 [[package]]
 name = "mstransfer"
-version = "0.2.2"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
@@ -1154,9 +1154,9 @@ dependencies = [
     { name = "rich" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b5/15/31725d48a77efe88517fce1a91bb272ecf316f3ce9ad13801ba01a81f630/mstransfer-0.2.2.tar.gz", hash = "sha256:bb73321f37427b0f1b54f93f2430df63250946a42d5d3c094fc09055d5bfdabe", size = 2005287, upload-time = "2026-03-25T20:16:01.262Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/44/92/1fdaf4e7fb3351eadbefabd5f14a3cc1054ae55e27235e6a2ff0cdca3462/mstransfer-0.2.3.tar.gz", hash = "sha256:d499684eab6105cd118b481c42d474af91d1fe733aace8814175de082001cef2", size = 2085913, upload-time = "2026-04-15T19:53:31.262Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/e5/e30eec39afb7afad4c8fde8d826b6fee631e3269ff0d65db5a1698f054c4/mstransfer-0.2.2-py3-none-any.whl", hash = "sha256:fb882b66d81b4d864245091fa5e9c9bf8417a7f01ed687f955ac3dac808c2c90", size = 23110, upload-time = "2026-03-25T20:15:59.807Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/f7/0ef84347bcef2adbbd258a0936b8031af28812a54df8445e7642299ded3e/mstransfer-0.2.3-py3-none-any.whl", hash = "sha256:5ef76ffa860ef2a15c0a4682d3306cc9f874777f0eaa0b91bcf657f6acb94ca9", size = 25809, upload-time = "2026-04-15T19:53:29.864Z" },
 ]
 
 [[package]]

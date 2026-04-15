@@ -112,7 +112,7 @@ class Manifest(BaseModel):
 
 @dataclass
 class Dataset:
-    """Result object returned by :func:`load_dataset`.
+    """Result object returned by `load_dataset`.
 
     Supports ``len()``, indexing, and iteration over downloaded file paths.
     """
