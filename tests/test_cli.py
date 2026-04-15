@@ -60,6 +60,7 @@ class TestDownloadCommand:
             show_progress=True,
             max_workers=4,
             store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_dataset")
@@ -78,6 +79,7 @@ class TestDownloadCommand:
             show_progress=True,
             max_workers=4,
             store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_dataset")
@@ -96,6 +98,7 @@ class TestDownloadCommand:
             show_progress=False,
             max_workers=4,
             store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_dataset")
@@ -115,6 +118,32 @@ class TestDownloadCommand:
         with pytest.raises(SystemExit) as exc:
             main(["download", "abc", "--store-as", "bogus"])
         assert exc.value.code == 2
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_output_flag(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        target = tmp_path / "custom-out"
+        main(["download", "abc", "-o", str(target)])
+        assert mock_load.call_args.kwargs["output_dir"] == target
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_output_long_flag(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        target = tmp_path / "custom-out"
+        main(["download", "abc", "--output", str(target)])
+        assert mock_load.call_args.kwargs["output_dir"] == target
 
     @patch("msdatasets.cli.download_dataset")
     def test_not_found_returns_1(self, mock_load):
@@ -168,6 +197,7 @@ class TestDownloadRepoSpec:
             show_progress=True,
             max_workers=4,
             store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_repo_dataset")
@@ -187,6 +217,7 @@ class TestDownloadRepoSpec:
             show_progress=True,
             max_workers=4,
             store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_repo_dataset")

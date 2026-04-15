@@ -565,6 +565,59 @@ class TestDownloadStoreAs:
         assert len(requests) == 2
 
 
+class TestDownloadOutputDir:
+    """Tests for the output_dir override on download_dataset."""
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_output_dir_bypasses_get_dataset_dir(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        target = tmp_path / "one-off"
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        mock_batch.return_value = [
+            target / "sample_01.mszx",
+            target / "sample_02.mszx",
+        ]
+
+        ds = download_dataset("550e8400", output_dir=target, show_progress=False)
+
+        # get_dataset_dir must not be consulted when output_dir is provided.
+        mock_dir.assert_not_called()
+        # Directory is created and used directly (no dataset_id subdir).
+        assert target.exists()
+        assert ds.cache_dir == target
+        # DownloadRequest dests land inside target.
+        requests = mock_batch.call_args[0][0]
+        assert all(r.dest.parent == target for r in requests)
+        # manifest.json is persisted inside the output dir too.
+        assert (target / "manifest.json").exists()
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_none_uses_default_cache_dir(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        mock_batch.return_value = [
+            ds_dir / "sample_01.mszx",
+            ds_dir / "sample_02.mszx",
+        ]
+
+        ds = download_dataset("550e8400", show_progress=False)
+
+        mock_dir.assert_called_once_with("550e8400")
+        assert ds.cache_dir == ds_dir
+
+
 class TestLoadDataset:
     """Tests for the load_dataset function (returns MSCompressDataset)."""
 
@@ -755,6 +808,7 @@ class TestDownloadRepoDataset:
             max_workers=4,
             filenames=["a.raw"],
             store_as="mszx",
+            output_dir=None,
         )
         assert result is expected
 
@@ -823,6 +877,7 @@ class TestLoadRepoDataset:
             max_workers=4,
             filenames=["a.raw"],
             store_as="mszx",
+            output_dir=None,
         )
         assert result == "wrapped"
 

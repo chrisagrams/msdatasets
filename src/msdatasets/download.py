@@ -169,6 +169,7 @@ def download_dataset(
     max_workers: int = 4,
     filenames: list[str] | None = None,
     store_as: StoreFormat = "mszx",
+    output_dir: Path | None = None,
 ) -> Dataset:
     """Download a dataset and return a :class:`Dataset` pointing to local files.
 
@@ -190,9 +191,14 @@ def download_dataset(
         raw archive shipped by the server).  Set to ``"msz"`` to extract
         the inner MSZ, or ``"mzml"`` to decompress fully to mzML.
         Conversion is handled by mstransfer.
+    output_dir:
+        Optional destination directory.  When set, files are written
+        directly here (no ``{dataset_id}`` subdir) and the cache root
+        from :func:`get_dataset_dir` is bypassed.  Useful for one-off
+        downloads outside the shared cache.
     """
     log.info("Downloading dataset %s", dataset_id)
-    dataset_dir = get_dataset_dir(dataset_id)
+    dataset_dir = output_dir if output_dir is not None else get_dataset_dir(dataset_id)
     dataset_dir.mkdir(parents=True, exist_ok=True)
     log.debug("Dataset directory: %s", dataset_dir)
 
@@ -298,6 +304,7 @@ def download_repo_dataset(
     show_progress: bool = True,
     max_workers: int = 4,
     store_as: StoreFormat = "mszx",
+    output_dir: Path | None = None,
 ) -> Dataset:
     """Trigger a repository import and download the resulting dataset.
 
@@ -324,6 +331,8 @@ def download_repo_dataset(
         Maximum number of parallel downloads.
     store_as:
         On-disk format for downloaded parts.  See :func:`download_dataset`.
+    output_dir:
+        Optional destination directory.  See :func:`download_dataset`.
     """
     source = RepoSource(source)
     console = Console(stderr=True)
@@ -363,6 +372,7 @@ def download_repo_dataset(
         max_workers=max_workers,
         filenames=filenames,
         store_as=store_as,
+        output_dir=output_dir,
     )
 
 
