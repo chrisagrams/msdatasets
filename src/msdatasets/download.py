@@ -184,6 +184,7 @@ def download_dataset(
             cached: list[Path] = []
             to_download: list[DatasetPart] = []
 
+            # Skip files that are already on disk, unless *force_download* is True.
             for part in manifest_.parts:
                 dest = dataset_dir / part.filename
                 if dest.exists() and not force_download:
@@ -192,6 +193,8 @@ def download_dataset(
                 else:
                     to_download.append(part)
 
+            # For files that need to be downloaded,
+            # ensure they are extracted and ready on the server.
             if to_download:
                 log.info(
                     "Downloading %d/%d part(s)",

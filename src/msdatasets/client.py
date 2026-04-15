@@ -46,6 +46,7 @@ async def _iter_sse_events(
             raise DownloadError(
                 f"SSE stream failed for {url}: HTTP {source.response.status_code}"
             )
+        # Parse events as they arrive, yielding validated models
         async for sse in source.aiter_sse():
             if sse.event == "done":
                 yield sse.event, None
@@ -60,10 +61,15 @@ async def fetch_manifest(
     client: httpx.AsyncClient,
 ) -> Manifest:
     """Fetch and parse the manifest for *dataset_id* from the server."""
+
+    # Construct the URL for the manifest endpoint
     url = f"{get_api_url()}/datasets/{dataset_id}/manifest"
+
+    # Optionally query for specific filenames if provided
     params = {"filenames": filenames} if filenames else None
     log.debug("Fetching manifest from %s", url)
 
+    # Make the GET request to fetch the manifest
     resp = await client.get(url, params=params)
 
     if resp.status_code == 404:
@@ -73,6 +79,7 @@ async def fetch_manifest(
             f"Server error {resp.status_code} fetching manifest for {dataset_id}"
         )
 
+    # Validate and parse the manifest JSON into a Manifest model
     manifest = Manifest.model_validate(resp.json())
     log.debug(
         "Manifest: %s (%d parts)",
@@ -84,8 +91,10 @@ async def fetch_manifest(
 
 async def stream_task(client: httpx.AsyncClient, task_id: str) -> None:
     """Stream SSE events for an extraction task until it reaches a terminal state."""
+    # Construct the URL for the task SSE endpoint
     url = f"{get_api_url()}/tasks/{task_id}/stream"
     async for event_type, event in _iter_sse_events(client, "GET", url, TaskEvent):
+        # Terminal events have no payload, so *event* is None and we can stop
         if event_type == "done" or event is None:
             return
         if event.state == "complete":
@@ -105,15 +114,18 @@ async def ensure_extracted(client: httpx.AsyncClient, part: DatasetPart) -> None
     the JSON payload is read to obtain the ``task_id`` and the task is
     streamed via SSE until extraction completes.
     """
+    # Construct the URL for the extraction endpoint for this part
     url = f"{get_api_url()}{part.extract_url}"
     log.debug("Checking extraction status for %s", part.filename)
 
     resp = await client.get(url)
 
+    # Already extracted and ready
     if resp.status_code == 204:
         log.debug("Already extracted: %s", part.filename)
         return
 
+    # Extraction queued, stream task events until complete
     if resp.status_code == 202:
         task_info = resp.json()
         task_id = task_info["task_id"]
@@ -122,6 +134,7 @@ async def ensure_extracted(client: httpx.AsyncClient, part: DatasetPart) -> None
         log.debug("Extraction complete: %s", part.filename)
         return
 
+    # Handle errors
     if resp.status_code == 404:
         raise DownloadError(f"Part not found: {part.filename}")
 
@@ -154,12 +167,15 @@ async def _stream_repo_import(
 
         file_name = event.file_name or "unknown"
 
+        # If a job fails, we currently have no way to recover.
+        # TODO: Consider retrying failed jobs
         if event.status == RepoImportStatus.FAILED:
             raise DownloadError(
                 f"Repository import failed for {file_name}: "
                 f"{event.error_message or 'unknown error'}"
             )
 
+        # Store the latest status for this job.
         job_states[event.job_id] = event.status
 
         if on_status is not None:
@@ -172,6 +188,7 @@ async def _stream_repo_import(
             len(job_states),
         )
 
+        # Once all jobs are complete, we can stop streaming and return the final result.
         if all(s == RepoImportStatus.COMPLETE for s in job_states.values()):
             return
 
@@ -195,10 +212,12 @@ async def trigger_repo_import(
     url = f"{get_api_url()}/repositories/{source.value}/projects/{accession}/dataset"
     log.info("Triggering %s import for %s", source.value, accession)
 
+    # Construct a request for a repository dataset import
     body = RepoDatasetRequest(filenames=filenames)
     if filenames:
         log.info("Requesting specific files: %s", filenames)
 
+    # Trigger the import by POSTing to the server.
     resp = await client.post(url, json=body.model_dump(exclude_none=True))
     if resp.status_code == 404:
         raise DatasetNotFoundError(f"{source.value} project not found: {accession}")
@@ -208,6 +227,8 @@ async def trigger_repo_import(
             f"HTTP {resp.status_code}"
         )
 
+    # Parse the initial response,
+    # which includes the status of all import jobs at the time of creation.
     result = RepoDatasetResponse.model_validate(resp.json())
 
     # Check if already done
@@ -220,6 +241,7 @@ async def trigger_repo_import(
         )
         return result
 
+    # If any jobs have already failed, we can stop early without streaming
     failed = [j for j in result.jobs if j.status == RepoImportStatus.FAILED]
     if failed:
         details = ", ".join(
@@ -229,6 +251,7 @@ async def trigger_repo_import(
         )
         raise DownloadError(f"{source.value} import failed — {details}")
 
+    # Stream SSE events until all jobs are complete.
     await _stream_repo_import(client, result, on_status=on_status)
 
     log.info(
