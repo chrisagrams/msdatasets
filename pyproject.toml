@@ -18,14 +18,29 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
-dependencies = []
+dependencies = [
+    "httpx>=0.27",
+    "httpx-sse>=0.4",
+    "mscompress>=1.0.13",
+    "mstransfer>=0.2.2",
+    "pydantic>=2.0",
+    "rich>=13.0",
+]
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.15",
     "pytest>=8.0",
+    "pytest-asyncio>=1.0",
     "pytest-cov>=4.0",
     "ruff>=0.9",
     "pre-commit>=4.0",
+]
+torch = [
+    "torch>=2.0",
+]
+all = [
+    "msdatasets[torch]",
 ]
 docs = [
     "mkdocs>=1.6",
@@ -37,6 +52,9 @@ docs = [
 Homepage = "https://chrisagrams.github.io/msdatasets"
 Repository = "https://github.com/chrisagrams/msdatasets"
 
+[project.scripts]
+msdatasets = "msdatasets.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -47,6 +65,7 @@ packages = ["src/msdatasets"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "--cov=msdatasets --cov-branch --cov-report=term-missing"
 
 [tool.ruff]
 line-length = 88
@@ -58,6 +77,18 @@ select = ["E", "F", "I", "N", "W"]
 [tool.ruff.format]
 docstring-code-format = true
 
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["mstransfer.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["msdatasets"]
 branch = true
@@ -67,3 +98,5 @@ exclude_lines = [
     "pragma: no cover",
     "if TYPE_CHECKING:",
 ]
+fail_under = 90
+show_missing = true
