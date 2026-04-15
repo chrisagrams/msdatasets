@@ -7,7 +7,7 @@ def test_version():
     """Test that version is defined."""
     assert hasattr(msdatasets, "__version__")
     assert isinstance(msdatasets.__version__, str)
-    assert msdatasets.__version__ == "0.1.0"
+    assert msdatasets.__version__ == "0.1.1"
 
 
 def test_import():
