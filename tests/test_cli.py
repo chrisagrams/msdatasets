@@ -55,7 +55,12 @@ class TestDownloadCommand:
         result = main(["download", "abc"])
         assert result == 0
         mock_load.assert_called_once_with(
-            "abc", force_download=False, show_progress=True, max_workers=4
+            "abc",
+            force_download=False,
+            show_progress=True,
+            max_workers=4,
+            store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_dataset")
@@ -69,7 +74,12 @@ class TestDownloadCommand:
 
         main(["download", "abc", "--force"])
         mock_load.assert_called_once_with(
-            "abc", force_download=True, show_progress=True, max_workers=4
+            "abc",
+            force_download=True,
+            show_progress=True,
+            max_workers=4,
+            store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_dataset")
@@ -83,8 +93,57 @@ class TestDownloadCommand:
 
         main(["download", "abc", "--no-progress"])
         mock_load.assert_called_once_with(
-            "abc", force_download=False, show_progress=False, max_workers=4
+            "abc",
+            force_download=False,
+            show_progress=False,
+            max_workers=4,
+            store_as="mszx",
+            output_dir=None,
         )
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_store_as_flag(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        main(["download", "abc", "--store-as", "mzml"])
+        assert mock_load.call_args.kwargs["store_as"] == "mzml"
+
+    def test_store_as_rejects_invalid_value(self):
+        # argparse exits with code 2 on invalid choice.
+        with pytest.raises(SystemExit) as exc:
+            main(["download", "abc", "--store-as", "bogus"])
+        assert exc.value.code == 2
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_output_flag(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        target = tmp_path / "custom-out"
+        main(["download", "abc", "-o", str(target)])
+        assert mock_load.call_args.kwargs["output_dir"] == target
+
+    @patch("msdatasets.cli.download_dataset")
+    def test_output_long_flag(self, mock_load, tmp_path):
+        mock_load.return_value = Dataset(
+            dataset_id="abc",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        target = tmp_path / "custom-out"
+        main(["download", "abc", "--output", str(target)])
+        assert mock_load.call_args.kwargs["output_dir"] == target
 
     @patch("msdatasets.cli.download_dataset")
     def test_not_found_returns_1(self, mock_load):
@@ -137,6 +196,8 @@ class TestDownloadRepoSpec:
             force_download=False,
             show_progress=True,
             max_workers=4,
+            store_as="mszx",
+            output_dir=None,
         )
 
     @patch("msdatasets.cli.download_repo_dataset")
@@ -155,7 +216,20 @@ class TestDownloadRepoSpec:
             force_download=False,
             show_progress=True,
             max_workers=4,
+            store_as="mszx",
+            output_dir=None,
         )
+
+    @patch("msdatasets.cli.download_repo_dataset")
+    def test_store_as_forwarded_for_repo_spec(self, mock_repo, tmp_path):
+        mock_repo.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        main(["download", "pride/PXD075509", "--store-as", "msz"])
+        assert mock_repo.call_args.kwargs["store_as"] == "msz"
 
     @patch("msdatasets.cli.download_repo_dataset")
     def test_repo_not_found_returns_1(self, mock_repo):

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
@@ -38,6 +38,20 @@ from msdatasets.models import (
     RepoImportStatus,
     RepoSource,
 )
+
+StoreFormat = Literal["mszx", "msz", "mzml"]
+
+_STORE_FORMAT_EXT: dict[StoreFormat, str] = {
+    "mszx": ".mszx",
+    "msz": ".msz",
+    "mzml": ".mzML",
+}
+
+
+def _target_filename(src_filename: str, store_as: StoreFormat) -> str:
+    """Return the on-disk filename for *src_filename* after format conversion."""
+    return str(Path(src_filename).with_suffix(_STORE_FORMAT_EXT[store_as]))
+
 
 _STATUS_LABELS: dict[RepoImportStatus, str] = {
     RepoImportStatus.PENDING: "Pending",
@@ -88,6 +102,7 @@ def download_part(
     part: DatasetPart,
     dest_dir: Path,
     *,
+    store_as: StoreFormat = "mszx",
     skip_existing: bool = False,
     force: bool = False,
 ) -> Path:
@@ -95,7 +110,8 @@ def download_part(
 
     If the server needs to extract the file first (202 Accepted), polls
     the task endpoint until the file is ready, then downloads via the
-    mstransfer endpoint.
+    mstransfer endpoint.  When *store_as* is ``"msz"`` or ``"mzml"``,
+    the downloaded ``.mszx`` is converted client-side by mstransfer.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     download_url = f"{get_api_url()}{part.download_url}"
@@ -110,7 +126,11 @@ def download_part(
     asyncio.run(_extract())
 
     result: Path = download_file(
-        download_url, dest, skip_existing=skip_existing, force=force
+        download_url,
+        dest,
+        store_as=store_as,
+        skip_existing=skip_existing,
+        force=force,
     )
     return result
 
@@ -148,6 +168,8 @@ def download_dataset(
     show_progress: bool = True,
     max_workers: int = 4,
     filenames: list[str] | None = None,
+    store_as: StoreFormat = "mszx",
+    output_dir: Path | None = None,
 ) -> Dataset:
     """Download a dataset and return a :class:`Dataset` pointing to local files.
 
@@ -164,9 +186,19 @@ def download_dataset(
     filenames:
         Optional list of filenames to include. When provided, the server
         returns a manifest containing only matching parts.
+    store_as:
+        On-disk format for downloaded parts.  Defaults to ``"mszx"`` (the
+        raw archive shipped by the server).  Set to ``"msz"`` to extract
+        the inner MSZ, or ``"mzml"`` to decompress fully to mzML.
+        Conversion is handled by mstransfer.
+    output_dir:
+        Optional destination directory.  When set, files are written
+        directly here (no ``{dataset_id}`` subdir) and the cache root
+        from :func:`get_dataset_dir` is bypassed.  Useful for one-off
+        downloads outside the shared cache.
     """
     log.info("Downloading dataset %s", dataset_id)
-    dataset_dir = get_dataset_dir(dataset_id)
+    dataset_dir = output_dir if output_dir is not None else get_dataset_dir(dataset_id)
     dataset_dir.mkdir(parents=True, exist_ok=True)
     log.debug("Dataset directory: %s", dataset_dir)
 
@@ -185,10 +217,13 @@ def download_dataset(
             to_download: list[DatasetPart] = []
 
             # Skip files that are already on disk, unless *force_download* is True.
+            # Cache is keyed by the target on-disk filename, so switching
+            # --store-as triggers a re-download rather than using a stale
+            # artifact in a different format.
             for part in manifest_.parts:
-                dest = dataset_dir / part.filename
+                dest = dataset_dir / _target_filename(part.filename, store_as)
                 if dest.exists() and not force_download:
-                    log.debug("Cached, skipping: %s", part.filename)
+                    log.debug("Cached, skipping: %s", dest.name)
                     cached.append(dest)
                 else:
                     to_download.append(part)
@@ -235,15 +270,19 @@ def download_dataset(
         with ctx:
             downloaded = download_batch(
                 requests,
+                store_as=store_as,
                 parallel=max_workers,
                 progress=batch_progress,
             )
             files.extend(downloaded)
 
-    # Ensure files are ordered by part_index
+    # Ensure files are ordered by part_index.  `files` entries use the
+    # target extension (set by mstransfer), so key the lookup by that name.
     file_map = {p.name: p for p in files}
     ordered_files = [
-        file_map[part.filename] for part in manifest.parts if part.filename in file_map
+        file_map[target]
+        for part in manifest.parts
+        if (target := _target_filename(part.filename, store_as)) in file_map
     ]
 
     ds = Dataset(
@@ -264,6 +303,8 @@ def download_repo_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
+    store_as: StoreFormat = "mszx",
+    output_dir: Path | None = None,
 ) -> Dataset:
     """Trigger a repository import and download the resulting dataset.
 
@@ -288,6 +329,10 @@ def download_repo_dataset(
         Show a ``rich`` progress bar during download.
     max_workers:
         Maximum number of parallel downloads.
+    store_as:
+        On-disk format for downloaded parts.  See :func:`download_dataset`.
+    output_dir:
+        Optional destination directory.  See :func:`download_dataset`.
     """
     source = RepoSource(source)
     console = Console(stderr=True)
@@ -326,6 +371,8 @@ def download_repo_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
         filenames=filenames,
+        store_as=store_as,
+        output_dir=output_dir,
     )
 
 

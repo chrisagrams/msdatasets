@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from rich.console import Console
 
@@ -59,6 +60,23 @@ def main(argv: list[str] | None = None) -> int:
         metavar="N",
         help="Number of parallel downloads (default: 4)",
     )
+    dl_parser.add_argument(
+        "--store-as",
+        choices=["mszx", "msz", "mzml"],
+        default="mszx",
+        help="Storage format on disk (default: mszx)",
+    )
+    dl_parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help=(
+            "Write files directly to DIR instead of the shared cache "
+            "(~/.ms/datasets/{id}).  No {dataset_id} subdir is created."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -107,6 +125,8 @@ def _cmd_download(args: argparse.Namespace) -> int:
                 force_download=args.force,
                 show_progress=not args.no_progress,
                 max_workers=args.workers,
+                store_as=args.store_as,
+                output_dir=args.output,
             )
         else:
             ds = download_dataset(
@@ -114,6 +134,8 @@ def _cmd_download(args: argparse.Namespace) -> int:
                 force_download=args.force,
                 show_progress=not args.no_progress,
                 max_workers=args.workers,
+                store_as=args.store_as,
+                output_dir=args.output,
             )
     except DatasetNotFoundError:
         console.print(f"[bold red]Error:[/] Dataset not found: {args.dataset_id}")

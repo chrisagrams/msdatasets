@@ -251,6 +251,7 @@ class TestDownloadPart:
         mock_dl_file.assert_called_once_with(
             "https://api.example.com/transfer/files/aaa.mszx",
             expected,
+            store_as="mszx",
             skip_existing=False,
             force=False,
         )
@@ -269,6 +270,7 @@ class TestDownloadPart:
         mock_dl_file.assert_called_once_with(
             "https://api.example.com/transfer/files/aaa.mszx",
             tmp_path / "test.mszx",
+            store_as="mszx",
             skip_existing=True,
             force=False,
         )
@@ -285,8 +287,26 @@ class TestDownloadPart:
         mock_dl_file.assert_called_once_with(
             "https://api.example.com/transfer/files/aaa.mszx",
             tmp_path / "test.mszx",
+            store_as="mszx",
             skip_existing=False,
             force=True,
+        )
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.ensure_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_file")
+    def test_forwards_store_as(self, mock_dl_file, mock_ensure, mock_api_url, tmp_path):
+        part = _make_part()
+        mock_dl_file.return_value = tmp_path / "test.mzML"
+
+        download_part(part, tmp_path, store_as="mzml")
+
+        mock_dl_file.assert_called_once_with(
+            "https://api.example.com/transfer/files/aaa.mszx",
+            tmp_path / "test.mszx",
+            store_as="mzml",
+            skip_existing=False,
+            force=False,
         )
 
     @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
@@ -446,6 +466,156 @@ class TestDownloadDataset:
         assert saved["total_parts"] == 2
         assert saved["parts"][0]["extract_url"] == "/datasets/550e8400/parts/aaa"
         assert saved["parts"][0]["download_url"] == "/transfer/files/aaa.mszx"
+
+
+class TestDownloadStoreAs:
+    """Tests for the store_as parameter on download_dataset."""
+
+    @pytest.mark.parametrize(
+        "store_as, ext",
+        [("mszx", ".mszx"), ("msz", ".msz"), ("mzml", ".mzML")],
+    )
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_forwards_store_as_and_orders_by_target_name(
+        self,
+        mock_batch,
+        mock_ensure,
+        mock_fetch,
+        mock_dir,
+        mock_api_url,
+        tmp_path,
+        store_as,
+        ext,
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+
+        # Emulate mstransfer's auto-extension rewrite.
+        mock_batch.return_value = [
+            ds_dir / f"sample_01{ext}",
+            ds_dir / f"sample_02{ext}",
+        ]
+
+        ds = download_dataset("550e8400", store_as=store_as, show_progress=False)
+
+        assert mock_batch.call_args.kwargs["store_as"] == store_as
+
+        # DownloadRequest dests stay as .mszx — mstransfer handles the rewrite.
+        requests = mock_batch.call_args[0][0]
+        assert [r.dest.name for r in requests] == ["sample_01.mszx", "sample_02.mszx"]
+
+        # Returned Dataset.files reflect the target extension, in manifest order.
+        assert [f.name for f in ds.files] == [
+            f"sample_01{ext}",
+            f"sample_02{ext}",
+        ]
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_mzml_cache_skips_download(
+        self, mock_batch, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        ds_dir.mkdir()
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+
+        # Pre-create both parts at the .mzML extension; cache check should hit.
+        (ds_dir / "sample_01.mzML").write_bytes(b"cached")
+        (ds_dir / "sample_02.mzML").write_bytes(b"cached")
+
+        ds = download_dataset("550e8400", store_as="mzml", show_progress=False)
+
+        mock_batch.assert_not_called()
+        assert [f.name for f in ds.files] == ["sample_01.mzML", "sample_02.mzML"]
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_mszx_on_disk_does_not_satisfy_mzml_request(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        ds_dir.mkdir()
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+
+        # A pre-existing .mszx must NOT count as cached when --store-as=mzml.
+        (ds_dir / "sample_01.mszx").write_bytes(b"stale")
+        (ds_dir / "sample_02.mszx").write_bytes(b"stale")
+
+        mock_batch.return_value = [
+            ds_dir / "sample_01.mzML",
+            ds_dir / "sample_02.mzML",
+        ]
+
+        download_dataset("550e8400", store_as="mzml", show_progress=False)
+
+        # Both parts re-downloaded because the cache key is per target format.
+        requests = mock_batch.call_args[0][0]
+        assert len(requests) == 2
+
+
+class TestDownloadOutputDir:
+    """Tests for the output_dir override on download_dataset."""
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_output_dir_bypasses_get_dataset_dir(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        target = tmp_path / "one-off"
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        mock_batch.return_value = [
+            target / "sample_01.mszx",
+            target / "sample_02.mszx",
+        ]
+
+        ds = download_dataset("550e8400", output_dir=target, show_progress=False)
+
+        # get_dataset_dir must not be consulted when output_dir is provided.
+        mock_dir.assert_not_called()
+        # Directory is created and used directly (no dataset_id subdir).
+        assert target.exists()
+        assert ds.cache_dir == target
+        # DownloadRequest dests land inside target.
+        requests = mock_batch.call_args[0][0]
+        assert all(r.dest.parent == target for r in requests)
+        # manifest.json is persisted inside the output dir too.
+        assert (target / "manifest.json").exists()
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_none_uses_default_cache_dir(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        mock_batch.return_value = [
+            ds_dir / "sample_01.mszx",
+            ds_dir / "sample_02.mszx",
+        ]
+
+        ds = download_dataset("550e8400", show_progress=False)
+
+        mock_dir.assert_called_once_with("550e8400")
+        assert ds.cache_dir == ds_dir
 
 
 class TestLoadDataset:
@@ -637,8 +807,30 @@ class TestDownloadRepoDataset:
             show_progress=False,
             max_workers=4,
             filenames=["a.raw"],
+            store_as="mszx",
+            output_dir=None,
         )
         assert result is expected
+
+    @patch("msdatasets.download.download_dataset")
+    @patch("msdatasets.download.trigger_repo_import", new_callable=AsyncMock)
+    def test_forwards_store_as(self, mock_trigger, mock_download, tmp_path):
+        mock_trigger.return_value = _repo_response("ds-xyz")
+        mock_download.return_value = Dataset(
+            dataset_id="ds-xyz",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+
+        download_repo_dataset(
+            "pride",
+            "PXD000001",
+            show_progress=False,
+            store_as="mzml",
+        )
+
+        assert mock_download.call_args.kwargs["store_as"] == "mzml"
 
 
 class TestLoadRepoDataset:
@@ -684,6 +876,8 @@ class TestLoadRepoDataset:
             show_progress=True,
             max_workers=4,
             filenames=["a.raw"],
+            store_as="mszx",
+            output_dir=None,
         )
         assert result == "wrapped"
 
