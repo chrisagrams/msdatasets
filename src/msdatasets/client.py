@@ -206,7 +206,7 @@ async def trigger_repo_import(
     Posts to ``/repositories/{source}/projects/{accession}/dataset`` and
     streams SSE events until all import jobs reach a terminal state.
 
-    Returns the final :class:`RepoDatasetResponse`.
+    Returns the final `RepoDatasetResponse`.
     """
     source = RepoSource(source)
     url = f"{get_api_url()}/repositories/{source.value}/projects/{accession}/dataset"

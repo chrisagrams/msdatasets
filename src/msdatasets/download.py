@@ -136,8 +136,8 @@ def download_part(
 
 
 class _RichBatchProgress:
-    """Adapts a rich :class:`Progress` bar to mstransfer's
-    :class:`BatchDownloadProgress` callback protocol."""
+    """Adapts a rich `Progress` bar to mstransfer's
+    `BatchDownloadProgress` callback protocol."""
 
     def __init__(self, progress: Progress) -> None:
         self._progress = progress
@@ -171,7 +171,7 @@ def download_dataset(
     store_as: StoreFormat = "mszx",
     output_dir: Path | None = None,
 ) -> Dataset:
-    """Download a dataset and return a :class:`Dataset` pointing to local files.
+    """Download a dataset and return a `Dataset` pointing to local files.
 
     Parameters
     ----------
@@ -194,7 +194,7 @@ def download_dataset(
     output_dir:
         Optional destination directory.  When set, files are written
         directly here (no ``{dataset_id}`` subdir) and the cache root
-        from :func:`get_dataset_dir` is bypassed.  Useful for one-off
+        from `get_dataset_dir` is bypassed.  Useful for one-off
         downloads outside the shared cache.
     """
     log.info("Downloading dataset %s", dataset_id)
@@ -330,9 +330,9 @@ def download_repo_dataset(
     max_workers:
         Maximum number of parallel downloads.
     store_as:
-        On-disk format for downloaded parts.  See :func:`download_dataset`.
+        On-disk format for downloaded parts.  See `download_dataset`.
     output_dir:
-        Optional destination directory.  See :func:`download_dataset`.
+        Optional destination directory.  See `download_dataset`.
     """
     source = RepoSource(source)
     console = Console(stderr=True)
@@ -385,10 +385,10 @@ def load_repo_dataset(
     show_progress: bool = True,
     max_workers: int = 4,
 ) -> MSCompressDataset:
-    """Trigger a repository import and return an :class:`MSCompressDataset` once ready.
+    """Trigger a repository import and return an `MSCompressDataset` once ready.
 
-    Convenience wrapper around :func:`download_repo_dataset` that loads the
-    downloaded files into an :class:`mscompress.datasets.torch.MSCompressDataset`.
+    Convenience wrapper around `download_repo_dataset` that loads the
+    downloaded files into an `mscompress.datasets.torch.MSCompressDataset`.
     Requires PyTorch to be installed.
     """
     dataset_cls = _import_torch_dataset()
@@ -410,10 +410,10 @@ def load_dataset(
     show_progress: bool = True,
     max_workers: int = 4,
 ) -> MSCompressDataset:
-    """Download a dataset and return an :class:`MSCompressDataset`.
+    """Download a dataset and return an `MSCompressDataset`.
 
-    Convenience wrapper around :func:`download_dataset` that loads the
-    downloaded files into an :class:`mscompress.datasets.torch.MSCompressDataset`
+    Convenience wrapper around `download_dataset` that loads the
+    downloaded files into an `mscompress.datasets.torch.MSCompressDataset`
     ready for iteration.  Requires PyTorch to be installed.
 
     If *dataset_id* matches the pattern ``{source}/<accession>`` (e.g.
