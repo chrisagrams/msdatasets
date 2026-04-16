@@ -97,6 +97,13 @@ class RepoImportEvent(NotificationEvent):
     dataset_id: str | None = None
     error_message: str | None = None
 
+    # Download progress — populated on DOWNLOADING ticks, None elsewhere.
+    # total_bytes is None when the server omits Content-Length (chunked transfer).
+    # Fields are optional for forward/backward compat with older servers.
+    bytes_downloaded: int | None = None
+    total_bytes: int | None = None
+    speed_bps: float | None = None
+
     def is_terminal(self) -> bool:
         return self.status in (RepoImportStatus.COMPLETE, RepoImportStatus.FAILED)
 

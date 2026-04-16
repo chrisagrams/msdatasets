@@ -154,8 +154,15 @@ async def _stream_repo_import(
     result: RepoDatasetResponse,
     *,
     on_status: Callable[[str, RepoImportStatus], None] | None = None,
+    on_progress: Callable[[RepoImportEvent], None] | None = None,
 ) -> None:
-    """Stream SSE events for a repository import until all jobs complete."""
+    """Stream SSE events for a repository import until all jobs complete.
+
+    ``on_status`` fires once per status transition per job.
+    ``on_progress`` fires on every event, including the ~2s download
+    progress ticks, and receives the full event (with ``bytes_downloaded``,
+    ``total_bytes``, ``speed_bps`` populated during DOWNLOADING).
+    """
     url = f"{get_api_url()}/repositories/datasets/{result.dataset_id}/stream"
     job_states: dict[str, RepoImportStatus] = {}
 
@@ -167,6 +174,10 @@ async def _stream_repo_import(
 
         file_name = event.file_name or "unknown"
 
+        # Always let progress observers see every event, including DOWNLOADING ticks.
+        if on_progress is not None:
+            on_progress(event)
+
         # If a job fails, we currently have no way to recover.
         # TODO: Consider retrying failed jobs
         if event.status == RepoImportStatus.FAILED:
@@ -175,18 +186,41 @@ async def _stream_repo_import(
                 f"{event.error_message or 'unknown error'}"
             )
 
-        # Store the latest status for this job.
+        # Only fire on_status + the summary log when a job actually changes
+        # status — otherwise downloading ticks would spam both.
+        previous = job_states.get(event.job_id)
+        is_transition = previous != event.status
         job_states[event.job_id] = event.status
 
-        if on_status is not None:
+        if is_transition and on_status is not None:
             on_status(file_name, event.status)
 
-        complete = sum(1 for s in job_states.values() if s == RepoImportStatus.COMPLETE)
-        log.info(
-            "Repository import: %d/%d files ready",
-            complete,
-            len(job_states),
-        )
+        if event.status == RepoImportStatus.DOWNLOADING and event.bytes_downloaded:
+            if event.total_bytes:
+                log.debug(
+                    "Repo import %s: %.1f%% (%d/%d bytes) %.2f MiB/s",
+                    file_name,
+                    100.0 * event.bytes_downloaded / event.total_bytes,
+                    event.bytes_downloaded,
+                    event.total_bytes,
+                    (event.speed_bps or 0.0) / (1 << 20),
+                )
+            else:
+                log.debug(
+                    "Repo import %s: %d bytes %.2f MiB/s",
+                    file_name,
+                    event.bytes_downloaded,
+                    (event.speed_bps or 0.0) / (1 << 20),
+                )
+        elif is_transition and event.status == RepoImportStatus.COMPLETE:
+            complete = sum(
+                1 for s in job_states.values() if s == RepoImportStatus.COMPLETE
+            )
+            log.info(
+                "Repository import: %d/%d files ready",
+                complete,
+                len(job_states),
+            )
 
         # Once all jobs are complete, we can stop streaming and return the final result.
         if all(s == RepoImportStatus.COMPLETE for s in job_states.values()):
@@ -200,11 +234,16 @@ async def trigger_repo_import(
     filenames: list[str] | None = None,
     client: httpx.AsyncClient,
     on_status: Callable[[str, RepoImportStatus], None] | None = None,
+    on_progress: Callable[[RepoImportEvent], None] | None = None,
 ) -> RepoDatasetResponse:
     """Trigger a repository import and wait until all jobs complete.
 
     Posts to ``/repositories/{source}/projects/{accession}/dataset`` and
     streams SSE events until all import jobs reach a terminal state.
+
+    ``on_status`` fires once per status transition per job.
+    ``on_progress`` receives every event, including ~2s download progress
+    ticks carrying ``bytes_downloaded`` / ``total_bytes`` / ``speed_bps``.
 
     Returns the final `RepoDatasetResponse`.
     """
@@ -252,7 +291,9 @@ async def trigger_repo_import(
         raise DownloadError(f"{source.value} import failed — {details}")
 
     # Stream SSE events until all jobs are complete.
-    await _stream_repo_import(client, result, on_status=on_status)
+    await _stream_repo_import(
+        client, result, on_status=on_status, on_progress=on_progress
+    )
 
     log.info(
         "%s import complete for %s (dataset %s)",
