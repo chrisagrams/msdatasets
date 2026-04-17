@@ -173,6 +173,11 @@ async def _stream_repo_import(
     }
     expected_job_ids = set(job_states)
     done_received = False
+    log.info(
+        "Streaming repo import for dataset %s (%d job(s) expected)",
+        result.dataset_id,
+        len(expected_job_ids),
+    )
 
     async for event_type, event in _iter_sse_events(
         client, "GET", url, RepoImportEvent
@@ -180,6 +185,14 @@ async def _stream_repo_import(
         if event_type == "done" or event is None:
             done_received = True
             break
+
+        # The server's SSE endpoint broadcasts events for every job in the
+        # dataset, not just the files this request asked for.  Ignore any
+        # event whose job isn't in our expected set — another user's
+        # failing download or a prior run's completed files must not
+        # leak into this CLI invocation.
+        if expected_job_ids and event.job_id not in expected_job_ids:
+            continue
 
         file_name = event.file_name or "unknown"
 
@@ -241,15 +254,24 @@ async def _stream_repo_import(
     # from the server is authoritative — trust it even if our local state
     # is behind.
     if not done_received:
-        unfinished = [
+        # Treat "expected but missing from the stream" and "observed but
+        # never reached a terminal state" both as unfinished — the second
+        # case protects us even if the initial job list was empty or the
+        # POST response schema doesn't carry job ids.
+        unfinished_ids = {
             jid
             for jid in expected_job_ids
             if job_states.get(jid) != RepoImportStatus.COMPLETE
-        ]
-        if unfinished:
+        }
+        unfinished_ids.update(
+            jid
+            for jid, status in job_states.items()
+            if status not in (RepoImportStatus.COMPLETE, RepoImportStatus.FAILED)
+        )
+        if unfinished_ids:
             raise DownloadError(
                 "Repository import stream closed before all jobs completed "
-                f"({len(unfinished)}/{len(expected_job_ids)} still pending). "
+                f"({len(unfinished_ids)} still pending). "
                 "Inspect /repositories/imports to see the latest status."
             )
 

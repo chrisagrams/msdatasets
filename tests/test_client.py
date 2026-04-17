@@ -241,7 +241,7 @@ class TestStreamRepoImport:
         self, _api, fake_sse_stream, make_repo_response
     ):
         result = make_repo_response()
-        payload = '{"status":"failed","job_id":"j1","error_message":"oops"}'
+        payload = '{"status":"failed","job_id":"job-0","error_message":"oops"}'
         patcher = fake_sse_stream([("status", payload)])
         client = AsyncMock()
         with patch("msdatasets.client.aconnect_sse", patcher):
@@ -358,6 +358,39 @@ class TestStreamRepoImport:
         with patch("msdatasets.client.aconnect_sse", patcher):
             with pytest.raises(DownloadError, match="stream closed"):
                 await _stream_repo_import(client, result)
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_ignores_events_for_unrelated_jobs(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Events for jobs the user didn't request must be dropped — e.g. a
+        stale FAILED record for another file in the same dataset must not
+        abort the current import."""
+        result = make_repo_response()  # expected: job-0
+        patcher = fake_sse_stream(
+            [
+                # Stray FAILED for a different job in the same dataset.
+                (
+                    "status",
+                    '{"status":"failed","job_id":"unrelated",'
+                    '"file_name":"other.raw","error_message":"stale"}',
+                ),
+                # Our job's actual lifecycle.
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
+            ]
+        )
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            # Must NOT raise from the stale FAILED event.
+            await _stream_repo_import(client, result)
 
     @pytest.mark.asyncio
     @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
