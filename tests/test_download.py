@@ -861,14 +861,45 @@ class TestLoadRepoDataset:
         mock_trigger.assert_called_once()
         kwargs = mock_trigger.call_args.kwargs
         assert kwargs["filenames"] == ["a.raw"]
-        assert kwargs["on_status"] is not None
+        assert kwargs["on_progress"] is not None
 
-        # Exercise the on_status callback (covers the inner function body).
-        on_status = kwargs["on_status"]
-        on_status("a.raw", RepoImportStatus.DOWNLOADING)
-        on_status("a.raw", RepoImportStatus.COMPLETE)
-        # Also an unknown status to hit the fallback label path.
-        on_status("a.raw", RepoImportStatus.FAILED)
+        # Exercise the on_progress callback across the lifecycle (covers
+        # task creation, description updates, and the 100% pin).
+        on_progress = kwargs["on_progress"]
+        from msdatasets.models import RepoImportEvent
+
+        on_progress(
+            RepoImportEvent(
+                status=RepoImportStatus.PENDING,
+                job_id="job-0",
+                file_name="a.raw",
+            )
+        )
+        on_progress(
+            RepoImportEvent(
+                status=RepoImportStatus.DOWNLOADING,
+                job_id="job-0",
+                file_name="a.raw",
+                bytes_downloaded=500,
+                total_bytes=1000,
+                speed_bps=100.0,
+            )
+        )
+        on_progress(
+            RepoImportEvent(
+                status=RepoImportStatus.COMPLETE,
+                job_id="job-0",
+                file_name="a.raw",
+            )
+        )
+        # Also a FAILED status to hit the fallback label path.
+        on_progress(
+            RepoImportEvent(
+                status=RepoImportStatus.FAILED,
+                job_id="job-0",
+                file_name="a.raw",
+            )
+        )
 
         mock_download.assert_called_once_with(
             "ds-xyz",
