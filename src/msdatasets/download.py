@@ -21,6 +21,7 @@ from rich.progress import (
     Progress,
     TaskID,
     TextColumn,
+    TimeRemainingColumn,
     TransferSpeedColumn,
 )
 
@@ -35,6 +36,7 @@ from msdatasets.models import (
     Dataset,
     DatasetPart,
     Manifest,
+    RepoImportEvent,
     RepoImportStatus,
     RepoSource,
 )
@@ -133,6 +135,89 @@ def download_part(
         force=force,
     )
     return result
+
+
+class _RichImportProgress:
+    """Adapts a rich `Progress` bar to the repo-import callback protocol.
+
+    One Progress task is created lazily per job (keyed by job_id).  The
+    task's description is updated on status transitions, and the bar
+    advances on every DOWNLOADING event with a populated ``bytes_downloaded``.
+    Status events that aren't DOWNLOADING (CONVERTING, INDEXING, COMPLETE)
+    peg the bar at 100% and update the description.
+    """
+
+    def __init__(self, progress: Progress) -> None:
+        self._progress = progress
+        self._tasks: dict[str, TaskID] = {}
+
+    def _ensure_task(
+        self,
+        job_id: str,
+        file_name: str,
+        total_bytes: int | None,
+    ) -> TaskID:
+        task_id = self._tasks.get(job_id)
+        if task_id is None:
+            task_id = self._progress.add_task(
+                self._describe(file_name, RepoImportStatus.PENDING),
+                total=total_bytes,
+                start=False,
+            )
+            self._tasks[job_id] = task_id
+        return task_id
+
+    @staticmethod
+    def _describe(file_name: str, status: RepoImportStatus) -> str:
+        label = _STATUS_LABELS.get(status, status.value)
+        return f"{file_name}: {label}"
+
+    def on_status(self, file_name: str, status: RepoImportStatus) -> None:
+        # on_status is transition-only; we may not have a task_id yet if
+        # PENDING is the initial state, so look up by file_name as a fallback.
+        job_id = self._find_job_by_file(file_name) or file_name
+        task_id = self._tasks.get(job_id)
+        if task_id is None:
+            task_id = self._progress.add_task(
+                self._describe(file_name, status), total=None, start=False
+            )
+            self._tasks[job_id] = task_id
+        if status == RepoImportStatus.DOWNLOADING:
+            self._progress.start_task(task_id)
+        self._progress.update(task_id, description=self._describe(file_name, status))
+        if status == RepoImportStatus.COMPLETE:
+            # Pin at 100% if we have a total; otherwise just mark the task done.
+            task = self._progress.tasks[task_id]
+            if task.total is not None:
+                self._progress.update(task_id, completed=task.total)
+
+    def on_progress(self, event: RepoImportEvent) -> None:
+        if (
+            event.status != RepoImportStatus.DOWNLOADING
+            or event.bytes_downloaded is None
+        ):
+            return
+        file_name = event.file_name or event.job_id
+        task_id = self._ensure_task(event.job_id, file_name, event.total_bytes)
+        # Start the task (so speed/ETA render) and jump to the absolute byte count.
+        task = self._progress.tasks[task_id]
+        if not task.started:
+            self._progress.start_task(task_id)
+        update_kwargs: dict[str, object] = {"completed": event.bytes_downloaded}
+        # Servers without Content-Length send total_bytes=None; if it shows
+        # up later (unlikely), patch the total in.
+        if event.total_bytes is not None and task.total != event.total_bytes:
+            update_kwargs["total"] = event.total_bytes
+        self._progress.update(task_id, **update_kwargs)
+
+    def _find_job_by_file(self, file_name: str) -> str | None:
+        # on_status only has file_name, but our tasks are keyed by job_id.
+        # Walk the Progress tasks to find one whose description matches.
+        for job_id, task_id in self._tasks.items():
+            task = self._progress.tasks[task_id]
+            if task.description.startswith(f"{file_name}:"):
+                return job_id
+        return None
 
 
 class _RichBatchProgress:
@@ -341,21 +426,24 @@ def download_repo_dataset(
         timeout = httpx.Timeout(10.0, read=None)
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             if show_progress:
-                with console.status(
-                    f"[bold blue]{source.value} import {accession}: pending…",
-                    spinner="dots",
-                ) as spinner:
-
-                    def _on_status(file_name: str, status: RepoImportStatus) -> None:
-                        label = _STATUS_LABELS.get(status, status.value)
-                        spinner.update(f"[bold blue]{file_name}: {label}…")
-
+                progress = Progress(
+                    TextColumn("[bold blue]{task.description}"),
+                    BarColumn(),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=False,
+                )
+                import_progress = _RichImportProgress(progress)
+                with progress:
                     result = await trigger_repo_import(
                         source,
                         accession,
                         filenames=filenames,
                         client=client,
-                        on_status=_on_status,
+                        on_status=import_progress.on_status,
+                        on_progress=import_progress.on_progress,
                     )
             else:
                 result = await trigger_repo_import(

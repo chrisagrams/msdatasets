@@ -179,8 +179,14 @@ class TestStreamRepoImport:
         result = make_repo_response()
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"downloading","job_id":"j","file_name":"a.raw"}'),
-                ("status", '{"status":"complete","job_id":"j","file_name":"a.raw"}'),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
             ]
         )
         callback = MagicMock()
@@ -202,13 +208,16 @@ class TestStreamRepoImport:
     async def test_exits_when_all_jobs_complete(
         self, _api, fake_sse_stream, make_repo_response
     ):
-        result = make_repo_response()
+        result = make_repo_response(
+            job_statuses=[RepoImportStatus.PENDING, RepoImportStatus.PENDING],
+            job_file_names=["a", "b"],
+        )
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"complete","job_id":"j1","file_name":"a"}'),
-                ("status", '{"status":"complete","job_id":"j2","file_name":"b"}'),
+                ("status", '{"status":"complete","job_id":"job-0","file_name":"a"}'),
+                ("status", '{"status":"complete","job_id":"job-1","file_name":"b"}'),
                 # Extra event that should never be consumed because loop exits.
-                ("status", '{"status":"pending","job_id":"j3","file_name":"c"}'),
+                ("status", '{"status":"pending","job_id":"job-2","file_name":"c"}'),
             ]
         )
         client = AsyncMock()
@@ -248,18 +257,24 @@ class TestStreamRepoImport:
         result = make_repo_response()
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"downloading","job_id":"j","file_name":"a.raw"}'),
                 (
                     "status",
-                    '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
                     '"bytes_downloaded":1000,"total_bytes":4000,"speed_bps":500.0}',
                 ),
                 (
                     "status",
-                    '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
                     '"bytes_downloaded":3000,"total_bytes":4000,"speed_bps":750.0}',
                 ),
-                ("status", '{"status":"complete","job_id":"j","file_name":"a.raw"}'),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
             ]
         )
         progress_events: list[RepoImportEvent] = []
@@ -284,19 +299,28 @@ class TestStreamRepoImport:
         result = make_repo_response()
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"downloading","job_id":"j","file_name":"a.raw"}'),
                 (
                     "status",
-                    '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
                     '"bytes_downloaded":100,"total_bytes":200,"speed_bps":50.0}',
                 ),
                 (
                     "status",
-                    '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
                     '"bytes_downloaded":200,"total_bytes":200,"speed_bps":75.0}',
                 ),
-                ("status", '{"status":"converting","job_id":"j","file_name":"a.raw"}'),
-                ("status", '{"status":"complete","job_id":"j","file_name":"a.raw"}'),
+                (
+                    "status",
+                    '{"status":"converting","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
             ]
         )
         callback = MagicMock()
@@ -312,6 +336,41 @@ class TestStreamRepoImport:
             RepoImportStatus.CONVERTING,
             RepoImportStatus.COMPLETE,
         ]
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_silent_stream_close_raises(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Stream ends without ``done`` and an expected job never completed."""
+        result = make_repo_response()  # one PENDING job
+        # Only DOWNLOADING ticks, no COMPLETE — simulates connection drop.
+        patcher = fake_sse_stream(
+            [
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":100,"total_bytes":200}',
+                ),
+            ]
+        )
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            with pytest.raises(DownloadError, match="stream closed"):
+                await _stream_repo_import(client, result)
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_done_event_suppresses_guard(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Explicit ``done`` is authoritative even if local state is behind."""
+        result = make_repo_response()  # one PENDING job
+        patcher = fake_sse_stream([("done", "")])
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            # No DownloadError raised even though job-0 never saw COMPLETE.
+            await _stream_repo_import(client, result)
 
 
 class TestRepoImportEventModel:

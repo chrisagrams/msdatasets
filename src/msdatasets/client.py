@@ -164,13 +164,22 @@ async def _stream_repo_import(
     ``total_bytes``, ``speed_bps`` populated during DOWNLOADING).
     """
     url = f"{get_api_url()}/repositories/datasets/{result.dataset_id}/stream"
-    job_states: dict[str, RepoImportStatus] = {}
+
+    # Seed from the initial POST response so the loop's completion check
+    # covers every known job, even if the SSE stream never emits an event
+    # for some of them (e.g. silent connection drop mid-stream).
+    job_states: dict[str, RepoImportStatus] = {
+        j.job_id: j.status for j in result.jobs if j.job_id is not None
+    }
+    expected_job_ids = set(job_states)
+    done_received = False
 
     async for event_type, event in _iter_sse_events(
         client, "GET", url, RepoImportEvent
     ):
         if event_type == "done" or event is None:
-            return
+            done_received = True
+            break
 
         file_name = event.file_name or "unknown"
 
@@ -222,9 +231,27 @@ async def _stream_repo_import(
                 len(job_states),
             )
 
-        # Once all jobs are complete, we can stop streaming and return the final result.
+        # Once all jobs are complete, we can stop streaming.
         if all(s == RepoImportStatus.COMPLETE for s in job_states.values()):
-            return
+            break
+
+    # Guard against a silent stream close (connection drop, server restart,
+    # proxy buffer, etc.).  Without this, a half-finished import would
+    # surface as "Done! 0 file(s)" in the CLI.  An explicit ``done`` event
+    # from the server is authoritative — trust it even if our local state
+    # is behind.
+    if not done_received:
+        unfinished = [
+            jid
+            for jid in expected_job_ids
+            if job_states.get(jid) != RepoImportStatus.COMPLETE
+        ]
+        if unfinished:
+            raise DownloadError(
+                "Repository import stream closed before all jobs completed "
+                f"({len(unfinished)}/{len(expected_job_ids)} still pending). "
+                "Inspect /repositories/imports to see the latest status."
+            )
 
 
 async def trigger_repo_import(
