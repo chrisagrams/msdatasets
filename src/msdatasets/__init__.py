@@ -9,6 +9,7 @@ from msdatasets.download import (
     load_repo_dataset,
 )
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
+from msdatasets.hf import download_hf_dataset, load_hf_dataset
 from msdatasets.models import Dataset, RepoSource
 
 __all__ = [
@@ -18,8 +19,10 @@ __all__ = [
     "ExtractionError",
     "RepoSource",
     "download_dataset",
+    "download_hf_dataset",
     "download_repo_dataset",
     "load_dataset",
+    "load_hf_dataset",
     "load_repo_dataset",
     "__version__",
 ]

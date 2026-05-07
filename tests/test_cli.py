@@ -242,6 +242,87 @@ class TestDownloadRepoSpec:
         assert main(["download", "pride/PXD075509"]) == 1
 
 
+class TestDownloadHfSpec:
+    """Tests for CLI dispatch on HuggingFace specs (hf/owner/repo...)."""
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    @patch("msdatasets.cli.download_dataset")
+    @patch("msdatasets.cli.download_repo_dataset")
+    def test_hf_spec_dispatches_to_hf(
+        self, mock_repo, mock_download, mock_hf, tmp_path
+    ):
+        mock_hf.return_value = Dataset(
+            dataset_id="alice/bench",
+            dataset_name="alice/bench",
+            cache_dir=tmp_path,
+            files=[],
+        )
+        result = main(["download", "hf/alice/bench"])
+        assert result == 0
+        mock_download.assert_not_called()
+        mock_repo.assert_not_called()
+        mock_hf.assert_called_once_with(
+            "alice/bench",
+            filenames=None,
+            force_download=False,
+            show_progress=True,
+            output_dir=None,
+        )
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_spec_with_filenames(self, mock_hf, tmp_path):
+        mock_hf.return_value = Dataset(
+            dataset_id="alice/bench",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        main(["download", "hf/alice/bench[a.mszx, b.mszx]", "--no-progress"])
+        mock_hf.assert_called_once_with(
+            "alice/bench",
+            filenames=["a.mszx", "b.mszx"],
+            force_download=False,
+            show_progress=False,
+            output_dir=None,
+        )
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_spec_with_output_dir(self, mock_hf, tmp_path):
+        mock_hf.return_value = Dataset(
+            dataset_id="alice/bench",
+            dataset_name=None,
+            cache_dir=tmp_path,
+            files=[],
+        )
+        target = tmp_path / "out"
+        main(["download", "hf/alice/bench", "-o", str(target)])
+        assert mock_hf.call_args.kwargs["output_dir"] == target
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_spec_rejects_store_as_msz(self, mock_hf, capsys):
+        result = main(["download", "hf/alice/bench", "--store-as", "msz"])
+        assert result == 1
+        mock_hf.assert_not_called()
+        captured = capsys.readouterr()
+        assert "--store-as" in captured.err or "--store-as" in captured.out
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_spec_rejects_store_as_mzml(self, mock_hf):
+        result = main(["download", "hf/alice/bench", "--store-as", "mzml"])
+        assert result == 1
+        mock_hf.assert_not_called()
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_not_found_returns_1(self, mock_hf):
+        mock_hf.side_effect = DatasetNotFoundError("nope")
+        assert main(["download", "hf/alice/missing"]) == 1
+
+    @patch("msdatasets.cli.download_hf_dataset")
+    def test_hf_download_error_returns_1(self, mock_hf):
+        mock_hf.side_effect = DownloadError("boom")
+        assert main(["download", "hf/alice/bench"]) == 1
+
+
 class TestConfigureLogging:
     """Tests for _configure_logging verbosity → log-level mapping."""
 

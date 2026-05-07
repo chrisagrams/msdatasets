@@ -9,8 +9,10 @@ loaded as a PyTorch `Dataset` for training pipelines.
 
 ## Features
 
-- **Flexible sources.** Download by UUID, or by PRIDE / MassIVE accession —
-  the server imports and converts remote projects on demand.
+- **Flexible sources.** Download by UUID, by PRIDE / MassIVE accession —
+  the server imports and converts remote projects on demand — or by
+  HuggingFace dataset repo (`hf/<owner>/<repo>`), which streams `.mszx`
+  files directly from the Hub.
 - **Format-aware storage.** Store each download as `.mszx` (raw archive),
   `.msz` (compressed MS data), or `.mzML` (fully decompressed).
 - **Parallel downloads** with a live `rich` progress bar.
@@ -18,13 +20,15 @@ loaded as a PyTorch `Dataset` for training pipelines.
   their state back over SSE; the client follows until files are ready.
 - **Filename filtering** with `accession[file1.raw,file2.mzML]` syntax.
 - **PyTorch integration** via the optional `torch` extra, returning an
-  `mscompress.datasets.torch.MSCompressDataset`.
+  `mscompress.datasets.torch.MSCompressDataset`. Pass
+  `load_annotations=[...]` to fetch PSMs alongside spectra.
 
 ## Installation
 
 ```bash
 pip install msdatasets              # base install
 pip install 'msdatasets[torch]'     # with PyTorch integration
+pip install 'msdatasets[hf]'        # with HuggingFace Hub support
 ```
 
 ## Quick start
