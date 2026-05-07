@@ -10,11 +10,13 @@ from pathlib import Path
 from rich.console import Console
 
 from msdatasets.download import (
+    _parse_hf_spec,
     _parse_repo_spec,
     download_dataset,
     download_repo_dataset,
 )
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError
+from msdatasets.hf import download_hf_dataset
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,8 +39,10 @@ def main(argv: list[str] | None = None) -> int:
     dl_parser.add_argument(
         "dataset_id",
         help=(
-            "Dataset identifier: a UUID, or a repository spec like "
-            "'pride/PXD075509' or 'massive/MSV000101460[file1.raw,file2.raw]'"
+            "Dataset identifier: a UUID, a repository spec like "
+            "'pride/PXD075509' or 'massive/MSV000101460[file1.raw,file2.raw]', "
+            "or a HuggingFace spec like "
+            "'hf/<owner>/<repo>[file1.mszx,file2.mszx]'"
         ),
     )
     dl_parser.add_argument(
@@ -58,7 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=4,
         metavar="N",
-        help="Number of parallel downloads (default: 4)",
+        help=(
+            "Number of parallel downloads (default: 4). "
+            "Ignored for hf/... specs (HF manages its own parallelism)."
+        ),
     )
     dl_parser.add_argument(
         "--store-as",
@@ -113,10 +120,27 @@ def _cmd_download(args: argparse.Namespace) -> int:
     """Handle the ``download`` subcommand."""
     console = Console(stderr=True)
 
-    repo_spec = _parse_repo_spec(args.dataset_id)
+    hf_spec = _parse_hf_spec(args.dataset_id)
+    repo_spec = None if hf_spec is not None else _parse_repo_spec(args.dataset_id)
+
+    if hf_spec is not None and args.store_as != "mszx":
+        console.print(
+            "[bold red]Error:[/] --store-as is not supported for hf/... specs "
+            "in this version (only 'mszx' is allowed)."
+        )
+        return 1
 
     try:
-        if repo_spec is not None:
+        if hf_spec is not None:
+            repo_id, filenames = hf_spec
+            ds = download_hf_dataset(
+                repo_id,
+                filenames=filenames,
+                force_download=args.force,
+                show_progress=not args.no_progress,
+                output_dir=args.output,
+            )
+        elif repo_spec is not None:
             source, accession, filenames = repo_spec
             ds = download_repo_dataset(
                 source,

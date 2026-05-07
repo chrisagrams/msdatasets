@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
+    from mscompress.types import AnnotationFormat
 
 import httpx
 from mstransfer.client import download_batch, download_file
@@ -69,6 +70,10 @@ _REPO_PATTERN = re.compile(
     r"^(?P<source>pride|massive)/(?P<accession>[^\[\]/]+)(?:\[(?P<files>[^\]]+)\])?$"
 )
 
+_HF_PATTERN = re.compile(
+    r"^hf/(?P<owner>[^/\[\]]+)/(?P<repo>[^/\[\]]+)(?:\[(?P<files>[^\]]+)\])?$"
+)
+
 
 def _parse_repo_spec(
     dataset_id: str,
@@ -86,6 +91,21 @@ def _parse_repo_spec(
     files_group = match.group("files")
     filenames = [f.strip() for f in files_group.split(",")] if files_group else None
     return source, accession, filenames
+
+
+def _parse_hf_spec(dataset_id: str) -> tuple[str, list[str] | None] | None:
+    """Parse an ``hf/<owner>/<repo>[files]`` spec.
+
+    Returns ``(repo_id, filenames)`` if *dataset_id* matches the HF pattern,
+    otherwise ``None``.
+    """
+    match = _HF_PATTERN.match(dataset_id)
+    if not match:
+        return None
+    repo_id = f"{match.group('owner')}/{match.group('repo')}"
+    files_group = match.group("files")
+    filenames = [f.strip() for f in files_group.split(",")] if files_group else None
+    return repo_id, filenames
 
 
 def _import_torch_dataset() -> type[MSCompressDataset]:
@@ -439,12 +459,17 @@ def load_repo_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
+    load_annotations: list[AnnotationFormat] | None = None,
 ) -> MSCompressDataset:
     """Trigger a repository import and return an `MSCompressDataset` once ready.
 
     Convenience wrapper around `download_repo_dataset` that loads the
     downloaded files into an `mscompress.datasets.torch.MSCompressDataset`.
     Requires PyTorch to be installed.
+
+    *load_annotations* is forwarded to ``MSCompressDataset``.  When set, the
+    dataset's ``__getitem__`` returns ``(mz, intensity, annotations_dict)``
+    instead of just ``(mz, intensity)``.
     """
     dataset_cls = _import_torch_dataset()
     ds = download_repo_dataset(
@@ -455,7 +480,7 @@ def load_repo_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir)
+    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
 
 
 def load_dataset(
@@ -464,6 +489,7 @@ def load_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
+    load_annotations: list[AnnotationFormat] | None = None,
 ) -> MSCompressDataset:
     """Download a dataset and return an `MSCompressDataset`.
 
@@ -476,18 +502,41 @@ def load_dataset(
     flow is used instead.  A specific filename subset may be specified in
     square brackets: ``pride/PXD000001[file1.raw,file2.mzML]``.
 
+    If *dataset_id* matches ``hf/<owner>/<repo>`` (e.g.
+    ``hf/myorg/proteomics-bench``), files are pulled directly from the
+    HuggingFace dataset repo.  Requires the ``hf`` extra.
+
     Parameters
     ----------
     dataset_id:
         Server-side dataset identifier, or a repository specifier like
-        ``pride/PXD075509`` or ``massive/MSV000078787``.
+        ``pride/PXD075509``, ``massive/MSV000078787``, or
+        ``hf/<owner>/<repo>[file1.mszx,file2.mszx]``.
     force_download:
         Re-download parts even if they already exist on disk.
     show_progress:
         Show a ``rich`` progress bar during download.
     max_workers:
         Maximum number of parallel downloads.
+    load_annotations:
+        Annotation formats to load alongside spectra (forwarded to
+        ``mscompress.datasets.torch.MSCompressDataset``).  When set, the
+        returned dataset's ``__getitem__`` yields
+        ``(mz, intensity, annotations_dict)`` instead of ``(mz, intensity)``.
     """
+    hf_spec = _parse_hf_spec(dataset_id)
+    if hf_spec is not None:
+        from msdatasets.hf import load_hf_dataset
+
+        repo_id, filenames = hf_spec
+        return load_hf_dataset(
+            repo_id,
+            filenames=filenames,
+            force_download=force_download,
+            show_progress=show_progress,
+            load_annotations=load_annotations,
+        )
+
     repo_spec = _parse_repo_spec(dataset_id)
     if repo_spec is not None:
         source, accession, filenames = repo_spec
@@ -498,6 +547,7 @@ def load_dataset(
             force_download=force_download,
             show_progress=show_progress,
             max_workers=max_workers,
+            load_annotations=load_annotations,
         )
 
     dataset_cls = _import_torch_dataset()
@@ -508,7 +558,7 @@ def load_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir)
+    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
 
 
 class _NullContext:

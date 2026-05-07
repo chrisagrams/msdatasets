@@ -643,7 +643,7 @@ class TestLoadDataset:
             show_progress=False,
             max_workers=4,
         )
-        mock_msc_cls.assert_called_once_with("/tmp/ds")
+        mock_msc_cls.assert_called_once_with("/tmp/ds", load_annotations=None)
         assert result is sentinel
 
 
@@ -973,7 +973,7 @@ class TestLoadDatasetRouting:
         mock_import.return_value = cls
         result = load_dataset("550e8400-e29b-41d4-a716-446655440000")
         mock_download.assert_called_once()
-        cls.assert_called_once_with(tmp_path)
+        cls.assert_called_once_with(tmp_path, load_annotations=None)
         assert result == "wrapped"
 
     @patch("msdatasets.download._import_torch_dataset")
@@ -992,3 +992,23 @@ class TestLoadDatasetRouting:
         mock_import.return_value = MagicMock(return_value="wrapped")
         load_dataset("unknown-source/ABC123")
         mock_download.assert_called_once()
+
+    @patch("msdatasets.hf.load_hf_dataset")
+    def test_hf_spec_dispatches_to_hf(self, mock_load_hf):
+        mock_load_hf.return_value = "wrapped"
+        result = load_dataset("hf/alice/bench[a.mszx,b.mszx]")
+        mock_load_hf.assert_called_once_with(
+            "alice/bench",
+            filenames=["a.mszx", "b.mszx"],
+            force_download=False,
+            show_progress=True,
+            load_annotations=None,
+        )
+        assert result == "wrapped"
+
+    @patch("msdatasets.hf.load_hf_dataset")
+    def test_hf_spec_forwards_load_annotations(self, mock_load_hf):
+        mock_load_hf.return_value = "wrapped"
+        sentinel = ["pseudo-AnnotationFormat"]
+        load_dataset("hf/alice/bench", load_annotations=sentinel)
+        assert mock_load_hf.call_args.kwargs["load_annotations"] is sentinel

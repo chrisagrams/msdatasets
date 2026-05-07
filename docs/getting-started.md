@@ -21,6 +21,13 @@ uv add msdatasets
 pip install 'msdatasets[torch]'
 ```
 
+To pull `.mszx` files from a HuggingFace dataset repo, install the `hf`
+extra:
+
+```bash
+pip install 'msdatasets[hf]'
+```
+
 ## Your first download
 
 ### By server UUID
@@ -41,7 +48,15 @@ msdatasets download pride/PXD075509
 msdatasets download pride/PXD075509[19HCD_3.mzML] --store-as mzml
 ```
 
-By default files land in `~/.ms/datasets/{dataset_id}/`. See
+### From a HuggingFace dataset repo
+
+```bash
+msdatasets download hf/myorg/proteomics-bench
+msdatasets download 'hf/myorg/proteomics-bench[run_01.mszx,run_02.mszx]'
+```
+
+By default files land in `~/.ms/datasets/{dataset_id}/` (or
+`~/.ms/datasets/hf/<owner>/<repo>/` for HuggingFace specs). See
 [Usage › Caching](usage.md#caching) to change the behavior.
 
 ## From Python
@@ -69,8 +84,25 @@ To load a MSDataset as a PyTorch Dataset (requires `pip install 'msdatasets[torc
 ```python
 from msdatasets import load_dataset
 
-# load_dataset accepts UUIDs and repository specs
+# load_dataset accepts UUIDs, repository specs, and HuggingFace specs
 dataset = load_dataset("pride/PXD075509[19HCD_3.mzML]")
+dataset = load_dataset("hf/myorg/proteomics-bench")
+```
+
+Pass `load_annotations=[...]` to fetch PSMs alongside spectra. With it set,
+each `dataset[i]` yields `(mz, intensity, annotations_dict)` instead of
+`(mz, intensity)`:
+
+```python
+from mscompress.types import AnnotationFormat
+from msdatasets import load_dataset
+
+dataset = load_dataset(
+    "hf/myorg/proteomics-bench",
+    load_annotations=[AnnotationFormat.PERCOLATOR_TSV],
+)
+mz, intensity, annotations = dataset[0]
+psms = annotations.get(AnnotationFormat.PERCOLATOR_TSV, [])
 ```
 
 ## Pointing at a different server
