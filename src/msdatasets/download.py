@@ -6,10 +6,11 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
+    from mscompress.types import AnnotationFormat
 
 import httpx
 from mstransfer.client import download_batch, download_file
@@ -21,6 +22,7 @@ from rich.progress import (
     Progress,
     TaskID,
     TextColumn,
+    TimeRemainingColumn,
     TransferSpeedColumn,
 )
 
@@ -35,6 +37,7 @@ from msdatasets.models import (
     Dataset,
     DatasetPart,
     Manifest,
+    RepoImportEvent,
     RepoImportStatus,
     RepoSource,
 )
@@ -67,6 +70,10 @@ _REPO_PATTERN = re.compile(
     r"^(?P<source>pride|massive)/(?P<accession>[^\[\]/]+)(?:\[(?P<files>[^\]]+)\])?$"
 )
 
+_HF_PATTERN = re.compile(
+    r"^hf/(?P<owner>[^/\[\]]+)/(?P<repo>[^/\[\]]+)(?:\[(?P<files>[^\]]+)\])?$"
+)
+
 
 def _parse_repo_spec(
     dataset_id: str,
@@ -84,6 +91,21 @@ def _parse_repo_spec(
     files_group = match.group("files")
     filenames = [f.strip() for f in files_group.split(",")] if files_group else None
     return source, accession, filenames
+
+
+def _parse_hf_spec(dataset_id: str) -> tuple[str, list[str] | None] | None:
+    """Parse an ``hf/<owner>/<repo>[files]`` spec.
+
+    Returns ``(repo_id, filenames)`` if *dataset_id* matches the HF pattern,
+    otherwise ``None``.
+    """
+    match = _HF_PATTERN.match(dataset_id)
+    if not match:
+        return None
+    repo_id = f"{match.group('owner')}/{match.group('repo')}"
+    files_group = match.group("files")
+    filenames = [f.strip() for f in files_group.split(",")] if files_group else None
+    return repo_id, filenames
 
 
 def _import_torch_dataset() -> type[MSCompressDataset]:
@@ -133,6 +155,57 @@ def download_part(
         force=force,
     )
     return result
+
+
+class _RichImportProgress:
+    """Adapts a rich `Progress` bar to the repo-import ``on_progress``
+    callback protocol.
+
+    Every event (not just DOWNLOADING ticks) flows through one entry
+    point so tasks are created lazily, keyed consistently by
+    ``event.job_id``, and their description tracks the current status.
+    """
+
+    def __init__(self, progress: Progress) -> None:
+        self._progress = progress
+        self._tasks: dict[str, TaskID] = {}
+
+    @staticmethod
+    def _describe(file_name: str, status: RepoImportStatus) -> str:
+        label = _STATUS_LABELS.get(status, status.value)
+        return f"{file_name}: {label}"
+
+    def on_progress(self, event: RepoImportEvent) -> None:
+        file_name = event.file_name or event.job_id
+        description = self._describe(file_name, event.status)
+
+        task_id = self._tasks.get(event.job_id)
+        if task_id is None:
+            task_id = self._progress.add_task(
+                description,
+                total=event.total_bytes,
+                start=event.status == RepoImportStatus.DOWNLOADING,
+            )
+            self._tasks[event.job_id] = task_id
+
+        task = self._progress.tasks[task_id]
+        update_kwargs: dict[str, Any] = {"description": description}
+
+        # Content-Length may only show up on later ticks (chunked → known
+        # total); patch the total in when it appears.
+        if event.total_bytes is not None and task.total != event.total_bytes:
+            update_kwargs["total"] = event.total_bytes
+
+        if event.status == RepoImportStatus.DOWNLOADING:
+            if not task.started:
+                self._progress.start_task(task_id)
+            if event.bytes_downloaded is not None:
+                update_kwargs["completed"] = event.bytes_downloaded
+        elif event.status == RepoImportStatus.COMPLETE and task.total is not None:
+            # Pin at 100% when we know the total.
+            update_kwargs["completed"] = task.total
+
+        self._progress.update(task_id, **update_kwargs)
 
 
 class _RichBatchProgress:
@@ -341,21 +414,23 @@ def download_repo_dataset(
         timeout = httpx.Timeout(10.0, read=None)
         async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
             if show_progress:
-                with console.status(
-                    f"[bold blue]{source.value} import {accession}: pending…",
-                    spinner="dots",
-                ) as spinner:
-
-                    def _on_status(file_name: str, status: RepoImportStatus) -> None:
-                        label = _STATUS_LABELS.get(status, status.value)
-                        spinner.update(f"[bold blue]{file_name}: {label}…")
-
+                progress = Progress(
+                    TextColumn("[bold blue]{task.description}"),
+                    BarColumn(),
+                    DownloadColumn(),
+                    TransferSpeedColumn(),
+                    TimeRemainingColumn(),
+                    console=console,
+                    transient=False,
+                )
+                import_progress = _RichImportProgress(progress)
+                with progress:
                     result = await trigger_repo_import(
                         source,
                         accession,
                         filenames=filenames,
                         client=client,
-                        on_status=_on_status,
+                        on_progress=import_progress.on_progress,
                     )
             else:
                 result = await trigger_repo_import(
@@ -384,12 +459,17 @@ def load_repo_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
+    load_annotations: list[AnnotationFormat] | None = None,
 ) -> MSCompressDataset:
     """Trigger a repository import and return an `MSCompressDataset` once ready.
 
     Convenience wrapper around `download_repo_dataset` that loads the
     downloaded files into an `mscompress.datasets.torch.MSCompressDataset`.
     Requires PyTorch to be installed.
+
+    *load_annotations* is forwarded to ``MSCompressDataset``.  When set, the
+    dataset's ``__getitem__`` returns ``(mz, intensity, annotations_dict)``
+    instead of just ``(mz, intensity)``.
     """
     dataset_cls = _import_torch_dataset()
     ds = download_repo_dataset(
@@ -400,7 +480,7 @@ def load_repo_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir)
+    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
 
 
 def load_dataset(
@@ -409,6 +489,7 @@ def load_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
+    load_annotations: list[AnnotationFormat] | None = None,
 ) -> MSCompressDataset:
     """Download a dataset and return an `MSCompressDataset`.
 
@@ -421,18 +502,41 @@ def load_dataset(
     flow is used instead.  A specific filename subset may be specified in
     square brackets: ``pride/PXD000001[file1.raw,file2.mzML]``.
 
+    If *dataset_id* matches ``hf/<owner>/<repo>`` (e.g.
+    ``hf/myorg/proteomics-bench``), files are pulled directly from the
+    HuggingFace dataset repo.  Requires the ``hf`` extra.
+
     Parameters
     ----------
     dataset_id:
         Server-side dataset identifier, or a repository specifier like
-        ``pride/PXD075509`` or ``massive/MSV000078787``.
+        ``pride/PXD075509``, ``massive/MSV000078787``, or
+        ``hf/<owner>/<repo>[file1.mszx,file2.mszx]``.
     force_download:
         Re-download parts even if they already exist on disk.
     show_progress:
         Show a ``rich`` progress bar during download.
     max_workers:
         Maximum number of parallel downloads.
+    load_annotations:
+        Annotation formats to load alongside spectra (forwarded to
+        ``mscompress.datasets.torch.MSCompressDataset``).  When set, the
+        returned dataset's ``__getitem__`` yields
+        ``(mz, intensity, annotations_dict)`` instead of ``(mz, intensity)``.
     """
+    hf_spec = _parse_hf_spec(dataset_id)
+    if hf_spec is not None:
+        from msdatasets.hf import load_hf_dataset
+
+        repo_id, filenames = hf_spec
+        return load_hf_dataset(
+            repo_id,
+            filenames=filenames,
+            force_download=force_download,
+            show_progress=show_progress,
+            load_annotations=load_annotations,
+        )
+
     repo_spec = _parse_repo_spec(dataset_id)
     if repo_spec is not None:
         source, accession, filenames = repo_spec
@@ -443,6 +547,7 @@ def load_dataset(
             force_download=force_download,
             show_progress=show_progress,
             max_workers=max_workers,
+            load_annotations=load_annotations,
         )
 
     dataset_cls = _import_torch_dataset()
@@ -453,7 +558,7 @@ def load_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir)
+    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
 
 
 class _NullContext:

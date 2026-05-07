@@ -16,6 +16,7 @@ from msdatasets.client import (
 )
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError, ExtractionError
 from msdatasets.models import (
+    RepoImportEvent,
     RepoImportStatus,
     RepoSource,
     TaskEvent,
@@ -178,8 +179,14 @@ class TestStreamRepoImport:
         result = make_repo_response()
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"downloading","job_id":"j","file_name":"a.raw"}'),
-                ("status", '{"status":"complete","job_id":"j","file_name":"a.raw"}'),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
             ]
         )
         callback = MagicMock()
@@ -201,13 +208,16 @@ class TestStreamRepoImport:
     async def test_exits_when_all_jobs_complete(
         self, _api, fake_sse_stream, make_repo_response
     ):
-        result = make_repo_response()
+        result = make_repo_response(
+            job_statuses=[RepoImportStatus.PENDING, RepoImportStatus.PENDING],
+            job_file_names=["a", "b"],
+        )
         patcher = fake_sse_stream(
             [
-                ("status", '{"status":"complete","job_id":"j1","file_name":"a"}'),
-                ("status", '{"status":"complete","job_id":"j2","file_name":"b"}'),
+                ("status", '{"status":"complete","job_id":"job-0","file_name":"a"}'),
+                ("status", '{"status":"complete","job_id":"job-1","file_name":"b"}'),
                 # Extra event that should never be consumed because loop exits.
-                ("status", '{"status":"pending","job_id":"j3","file_name":"c"}'),
+                ("status", '{"status":"pending","job_id":"job-2","file_name":"c"}'),
             ]
         )
         client = AsyncMock()
@@ -231,12 +241,202 @@ class TestStreamRepoImport:
         self, _api, fake_sse_stream, make_repo_response
     ):
         result = make_repo_response()
-        payload = '{"status":"failed","job_id":"j1","error_message":"oops"}'
+        payload = '{"status":"failed","job_id":"job-0","error_message":"oops"}'
         patcher = fake_sse_stream([("status", payload)])
         client = AsyncMock()
         with patch("msdatasets.client.aconnect_sse", patcher):
             with pytest.raises(DownloadError, match="unknown"):
                 await _stream_repo_import(client, result)
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_on_progress_receives_download_ticks(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """on_progress fires on every event, including repeated DOWNLOADING ticks."""
+        result = make_repo_response()
+        patcher = fake_sse_stream(
+            [
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":1000,"total_bytes":4000,"speed_bps":500.0}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":3000,"total_bytes":4000,"speed_bps":750.0}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
+            ]
+        )
+        progress_events: list[RepoImportEvent] = []
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            await _stream_repo_import(
+                client, result, on_progress=progress_events.append
+            )
+        # Every event — including progress ticks and terminal — is delivered.
+        assert len(progress_events) == 4
+        assert progress_events[1].bytes_downloaded == 1000
+        assert progress_events[1].total_bytes == 4000
+        assert progress_events[1].speed_bps == 500.0
+        assert progress_events[2].bytes_downloaded == 3000
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_on_status_fires_only_on_transitions(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Repeated DOWNLOADING events must not re-fire on_status."""
+        result = make_repo_response()
+        patcher = fake_sse_stream(
+            [
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":100,"total_bytes":200,"speed_bps":50.0}',
+                ),
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":200,"total_bytes":200,"speed_bps":75.0}',
+                ),
+                (
+                    "status",
+                    '{"status":"converting","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
+            ]
+        )
+        callback = MagicMock()
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            await _stream_repo_import(client, result, on_status=callback)
+        # Transitions: PENDING→DOWNLOADING, DOWNLOADING→CONVERTING, CONVERTING→COMPLETE.
+        # The two DOWNLOADING ticks after the initial one must not re-fire.
+        assert callback.call_count == 3
+        statuses = [c.args[1] for c in callback.call_args_list]
+        assert statuses == [
+            RepoImportStatus.DOWNLOADING,
+            RepoImportStatus.CONVERTING,
+            RepoImportStatus.COMPLETE,
+        ]
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_silent_stream_close_raises(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Stream ends without ``done`` and an expected job never completed."""
+        result = make_repo_response()  # one PENDING job
+        # Only DOWNLOADING ticks, no COMPLETE — simulates connection drop.
+        patcher = fake_sse_stream(
+            [
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw",'
+                    '"bytes_downloaded":100,"total_bytes":200}',
+                ),
+            ]
+        )
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            with pytest.raises(DownloadError, match="stream closed"):
+                await _stream_repo_import(client, result)
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_ignores_events_for_unrelated_jobs(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Events for jobs the user didn't request must be dropped — e.g. a
+        stale FAILED record for another file in the same dataset must not
+        abort the current import."""
+        result = make_repo_response()  # expected: job-0
+        patcher = fake_sse_stream(
+            [
+                # Stray FAILED for a different job in the same dataset.
+                (
+                    "status",
+                    '{"status":"failed","job_id":"unrelated",'
+                    '"file_name":"other.raw","error_message":"stale"}',
+                ),
+                # Our job's actual lifecycle.
+                (
+                    "status",
+                    '{"status":"downloading","job_id":"job-0","file_name":"a.raw"}',
+                ),
+                (
+                    "status",
+                    '{"status":"complete","job_id":"job-0","file_name":"a.raw"}',
+                ),
+            ]
+        )
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            # Must NOT raise from the stale FAILED event.
+            await _stream_repo_import(client, result)
+
+    @pytest.mark.asyncio
+    @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")
+    async def test_done_event_suppresses_guard(
+        self, _api, fake_sse_stream, make_repo_response
+    ):
+        """Explicit ``done`` is authoritative even if local state is behind."""
+        result = make_repo_response()  # one PENDING job
+        patcher = fake_sse_stream([("done", "")])
+        client = AsyncMock()
+        with patch("msdatasets.client.aconnect_sse", patcher):
+            # No DownloadError raised even though job-0 never saw COMPLETE.
+            await _stream_repo_import(client, result)
+
+
+class TestRepoImportEventModel:
+    """RepoImportEvent parses with and without progress fields."""
+
+    def test_parses_without_progress_fields(self):
+        """Payload from an older server (no progress fields) must still parse."""
+        event = RepoImportEvent.model_validate_json(
+            '{"status":"downloading","job_id":"j","file_name":"a.raw"}'
+        )
+        assert event.bytes_downloaded is None
+        assert event.total_bytes is None
+        assert event.speed_bps is None
+
+    def test_parses_with_progress_fields(self):
+        """New-server payload with progress fields populates them."""
+        event = RepoImportEvent.model_validate_json(
+            '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+            '"bytes_downloaded":1024,"total_bytes":4096,"speed_bps":512.5}'
+        )
+        assert event.bytes_downloaded == 1024
+        assert event.total_bytes == 4096
+        assert event.speed_bps == 512.5
+
+    def test_total_bytes_none_for_chunked(self):
+        """Chunked transfer: bytes + speed present, total_bytes absent."""
+        event = RepoImportEvent.model_validate_json(
+            '{"status":"downloading","job_id":"j","file_name":"a.raw",'
+            '"bytes_downloaded":2048,"speed_bps":1024.0}'
+        )
+        assert event.bytes_downloaded == 2048
+        assert event.total_bytes is None
+        assert event.speed_bps == 1024.0
 
 
 class TestTriggerRepoImport:
@@ -318,8 +518,9 @@ class TestTriggerRepoImport:
 
         assert result.dataset_id == response_body.dataset_id
         mock_stream.assert_called_once()
-        # on_status kwarg forwarded
+        # on_status + on_progress kwargs forwarded
         assert "on_status" in mock_stream.call_args.kwargs
+        assert "on_progress" in mock_stream.call_args.kwargs
 
     @pytest.mark.asyncio
     @patch("msdatasets.client.get_api_url", return_value="https://api.example.com")

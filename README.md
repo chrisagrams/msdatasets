@@ -27,6 +27,7 @@ loaded as a PyTorch `Dataset` for training pipelines.
 ```bash
 pip install msdatasets              # base install
 pip install 'msdatasets[torch]'     # with PyTorch integration
+pip install 'msdatasets[hf]'        # with HuggingFace Hub support
 ```
 
 ## Quick start
@@ -45,6 +46,10 @@ msdatasets download pride/PXD075509[19HCD_3.mzML] --store-as mzml
 
 # Write directly to a directory instead of the shared cache
 msdatasets download massive/MSV000101460 -o ./my-data
+
+# From a HuggingFace dataset repo of .mszx files
+msdatasets download hf/myorg/proteomics-bench
+msdatasets download 'hf/myorg/proteomics-bench[run_01.mszx,run_02.mszx]'
 ```
 
 ### Python
@@ -73,9 +78,28 @@ ds = download_repo_dataset(
 from msdatasets import load_dataset
 
 # Returns an mscompress.datasets.torch.MSCompressDataset.
-# Accepts UUIDs and repository specs.
+# Accepts UUIDs, repository specs, and HuggingFace specs.
 dataset = load_dataset("pride/PXD075509[19HCD_3.mzML]")
+dataset = load_dataset("hf/myorg/proteomics-bench")
 ```
+
+### HuggingFace Hub
+
+```python
+from msdatasets import download_hf_dataset
+
+ds = download_hf_dataset(
+    "myorg/proteomics-bench",
+    filenames=["run_01.mszx", "run_02.mszx"],   # optional subset
+    revision="v1.0",                              # optional branch/tag/commit
+    token=None,                                   # falls back to HF_TOKEN
+)
+print(ds.cache_dir, len(ds), "files")
+```
+
+HF downloads land at `~/.ms/datasets/hf/<owner>/<repo>/` by default. Files are
+stored as-is — `--store-as` conversion is not supported for HF specs in this
+version.
 
 ## Configuration
 
