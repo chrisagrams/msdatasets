@@ -30,18 +30,26 @@ Exit codes: `0` on success, `1` on dataset-not-found or download error,
 
 ## Dataset identifiers
 
-The `dataset_id` argument accepts three shapes:
+The `dataset_id` argument accepts these shapes:
 
 | Shape                      | Example                                       |
 |----------------------------|-----------------------------------------------|
 | UUID                       | `550e8400-e29b-41d4-a716-446655440000`        |
 | Repository accession       | `pride/PXD075509` or `massive/MSV000101460`   |
 | Accession with file subset | `pride/PXD075509[19HCD_3.mzML,other.mzML]`    |
+| HuggingFace dataset repo   | `hf/<owner>/<repo>` or `hf/<owner>/<repo>[file1.mszx,file2.mszx]` |
 
 When a repository spec is supplied, the server imports the project on
 demand (if not already imported) and streams progress over SSE until all
 files are ready. The call is idempotent — re-running for the same project
 returns the existing dataset.
+
+When a HuggingFace spec is supplied, files are pulled directly from the
+Hub via `huggingface_hub.snapshot_download`; the msdatasets server is not
+involved. Only `.mszx`, `.msz`, `.mzML`, `manifest.json`, and `README.md`
+are matched by default; pass an explicit filename subset to override.
+Requires `pip install 'msdatasets[hf]'`. `--store-as` is rejected for
+HuggingFace specs in this version — files are stored as-is.
 
 ## Storage formats
 
@@ -70,9 +78,13 @@ resolved in this order:
 Each dataset directory also contains a `manifest.json` written after the
 manifest is fetched, for offline inspection.
 
+HuggingFace downloads land at `<cache_dir>/hf/<owner>/<repo>/` instead, to
+preserve org/repo separation and avoid collisions with UUID-keyed
+directories.
+
 To write somewhere else entirely, pass `-o/--output DIR` on the CLI or
 `output_dir=Path(...)` to the Python functions. The directory is used
-as-is — no `{dataset_id}` subdirectory is added.
+as-is — no `{dataset_id}` or `hf/<owner>/<repo>` subdirectory is added.
 
 ## Environment variables
 
@@ -123,7 +135,27 @@ ds = download_repo_dataset(
 )
 ```
 
-### `load_dataset` / `load_repo_dataset`
+### `download_hf_dataset`
+
+Pull `.mszx` files directly from a HuggingFace dataset repo. Requires
+`pip install 'msdatasets[hf]'`:
+
+```python
+from msdatasets import download_hf_dataset
+
+ds = download_hf_dataset(
+    "myorg/proteomics-bench",
+    filenames=["run_01.mszx", "run_02.mszx"],   # optional subset
+    revision="v1.0",                              # branch / tag / commit
+    token=None,                                   # falls back to HF_TOKEN
+)
+print(ds.cache_dir, len(ds))
+```
+
+The HF flow does not go through the msdatasets server. `store_as` is not
+supported — files land as-is.
+
+### `load_dataset` / `load_repo_dataset` / `load_hf_dataset`
 
 Convenience wrappers that return an
 `mscompress.datasets.torch.MSCompressDataset`. They require
@@ -132,12 +164,32 @@ Convenience wrappers that return an
 ```python
 from msdatasets import load_dataset
 
-# UUIDs and repository specs both work; filenames come from the [...] syntax
+# UUIDs, repository specs, and HuggingFace specs all work; filenames come
+# from the [...] syntax.
 dataset = load_dataset("pride/PXD075509[19HCD_3.mzML]")
+dataset = load_dataset("hf/myorg/proteomics-bench")
 ```
 
-`load_dataset` and `load_repo_dataset` do not expose `store_as` or
-`output_dir`; they download to the default cache as `.mszx` and hand the
+Pass `load_annotations=[...]` to fetch PSMs alongside spectra. Each
+`dataset[i]` then yields `(mz, intensity, annotations_dict)` instead of
+just `(mz, intensity)`. Available formats are
+`AnnotationFormat.PERCOLATOR_TSV`, `AnnotationFormat.PEPXML`, and
+`AnnotationFormat.TSV`:
+
+```python
+from mscompress.types import AnnotationFormat
+from msdatasets import load_dataset
+
+dataset = load_dataset(
+    "hf/myorg/proteomics-bench",
+    load_annotations=[AnnotationFormat.PERCOLATOR_TSV],
+)
+mz, intensity, annotations = dataset[0]
+psms = annotations.get(AnnotationFormat.PERCOLATOR_TSV, [])
+```
+
+`load_dataset`, `load_repo_dataset`, and `load_hf_dataset` do not expose
+`store_as`; they download to the default cache as `.mszx` and hand the
 cache directory to `MSCompressDataset`.
 
 ### Exceptions
