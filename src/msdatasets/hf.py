@@ -155,13 +155,9 @@ def download_hf_dataset(
                 allow_patterns=allow_patterns,
             )
     except RepoNotFound as exc:
-        raise DatasetNotFoundError(
-            f"HuggingFace dataset not found: {repo_id}"
-        ) from exc
+        raise DatasetNotFoundError(f"HuggingFace dataset not found: {repo_id}") from exc
     except RevNotFound as exc:
-        raise DownloadError(
-            f"Revision not found: {revision} in {repo_id}"
-        ) from exc
+        raise DownloadError(f"Revision not found: {revision} in {repo_id}") from exc
     except HfHubHTTPError as exc:
         raise DownloadError(f"HuggingFace download failed: {exc}") from exc
 

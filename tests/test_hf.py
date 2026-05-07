@@ -262,9 +262,7 @@ class TestHfErrorMapping:
 
         ctx, _ = _patch_hf_hub(boom)
         with ctx, pytest.raises(DownloadError, match="Revision"):
-            download_hf_dataset(
-                "alice/bench", revision="v9", show_progress=False
-            )
+            download_hf_dataset("alice/bench", revision="v9", show_progress=False)
 
     @patch("msdatasets.hf.get_cache_dir")
     def test_http_error_raises_download_error(self, mock_cache, tmp_path):

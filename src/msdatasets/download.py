@@ -6,7 +6,7 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
@@ -189,7 +189,7 @@ class _RichImportProgress:
             self._tasks[event.job_id] = task_id
 
         task = self._progress.tasks[task_id]
-        update_kwargs: dict[str, object] = {"description": description}
+        update_kwargs: dict[str, Any] = {"description": description}
 
         # Content-Length may only show up on later ticks (chunked → known
         # total); patch the total in when it appears.
