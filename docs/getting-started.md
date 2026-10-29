@@ -150,5 +150,5 @@ uv run pytest
 Serve the docs locally:
 
 ```bash
-uv run mkdocs serve
+uv run zensical serve
 ```

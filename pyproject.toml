@@ -38,9 +38,10 @@ all = [
     "msdatasets[torch,hf]",
 ]
 docs = [
-    "mkdocs>=1.6",
-    "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.24",
+    # The docs toolchain requires Python >=3.11; the docs workflow builds on 3.12.
+    "zensical>=0.0.73; python_version >= '3.11'",
+    "mkdocstrings[python]>=1.0.8; python_version >= '3.11'",
+    "mkdocs-llmstxt>=0.5.1; python_version >= '3.11'",
 ]
 
 [dependency-groups]
