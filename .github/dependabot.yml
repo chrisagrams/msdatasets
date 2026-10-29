@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+      prefix-development: "chore(deps)"
+    groups:
+      # Groups match first-wins, so ms-packages must stay ahead of the catch-alls
+      ms-packages:
+        patterns: ["mscompress", "mstransfer"]
+      dev-dependencies:
+        dependency-type: "development"
+        update-types: ["minor", "patch"]
+      production-dependencies:
+        dependency-type: "production"
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      github-actions:
+        patterns: ["*"]

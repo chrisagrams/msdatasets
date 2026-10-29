@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "python",
+  "include-component-in-tag": false,
+  "bootstrap-sha": "23dd2b5bb07a5c37e3206bfb61fb365ddb0d5121",
+  "last-release-sha": "23dd2b5bb07a5c37e3206bfb61fb365ddb0d5121",
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "refactor", "section": "Code Refactoring" },
+    { "type": "deps", "section": "Dependencies" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "ci", "section": "Continuous Integration", "hidden": true },
+    { "type": "build", "section": "Build System", "hidden": true },
+    { "type": "style", "section": "Styles", "hidden": true },
+    { "type": "chore", "section": "Miscellaneous Chores", "hidden": true }
+  ],
+  "packages": {
+    ".": {
+      "package-name": "msdatasets",
+      "extra-files": [
+        { "type": "toml", "path": "uv.lock", "jsonpath": "$.package[?(@.name==\"msdatasets\")].version" },
+        { "type": "generic", "path": "src/msdatasets/__init__.py" }
+      ]
+    }
+  }
+}
