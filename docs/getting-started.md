@@ -135,7 +135,7 @@ Clone the repository and install in development mode:
 ```bash
 git clone https://github.com/chrisagrams/msdatasets.git
 cd msdatasets
-uv sync --extra dev --extra docs
+uv sync --extra docs
 uv run pre-commit install
 ```
 

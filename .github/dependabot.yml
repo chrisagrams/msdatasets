@@ -5,11 +5,15 @@ updates:
     directory: "/"
     target-branch: "dev"
     schedule:
-      interval: "weekly"
+      interval: "daily"
     open-pull-requests-limit: 5
     commit-message:
-      prefix: "chore(deps)"
+      prefix: "deps"
+      prefix-development: "chore(deps)"
     groups:
+      # Groups match first-wins, so ms-packages must stay ahead of the catch-alls
+      ms-packages:
+        patterns: ["mscompress", "mstransfer"]
       dev-dependencies:
         dependency-type: "development"
         update-types: ["minor", "patch"]
@@ -23,7 +27,7 @@ updates:
     schedule:
       interval: "weekly"
     commit-message:
-      prefix: "chore(ci)"
+      prefix: "ci"
     groups:
       github-actions:
         patterns: ["*"]
