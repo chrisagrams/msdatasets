@@ -9,6 +9,7 @@ watch:
 
 theme:
   name: material
+  variant: classic
   palette:
     - scheme: default
       primary: indigo
@@ -47,12 +48,35 @@ plugins:
             show_symbol_type_toc: true
             members_order: source
             filters: ["!^_"]
+  # Must come after mkdocstrings so API reference pages are rendered first.
+  # Emits /llms.txt (index), /llms-full.txt (all pages concatenated), and a
+  # Markdown copy of every listed page next to its HTML (e.g. /usage/index.md).
+  - llmstxt:
+      full_output: llms-full.txt
+      markdown_description: |
+        msdatasets is a Python client and CLI for downloading mass
+        spectrometry datasets from the msdatasets server, by server UUID,
+        PRIDE / MassIVE accession, or HuggingFace dataset repo. Downloads are
+        cached on disk as `.mszx`, `.msz`, or `.mzML`, and can be loaded as a
+        PyTorch `Dataset`. Every page below is available as Markdown;
+        `llms-full.txt` contains all of them in one file.
+      sections:
+        Getting started:
+          - index.md
+          - getting-started.md
+        Usage:
+          - usage.md
+        API reference:
+          - api.md
 
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
   - Usage: usage.md
   - API Reference: api.md
+
+extra:
+  generator: false
 
 markdown_extensions:
   - pymdownx.highlight:

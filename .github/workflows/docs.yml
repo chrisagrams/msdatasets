@@ -3,16 +3,19 @@ name: Deploy Docs
 on:
   release:
     types: [published]
+  # Validate the site builds on every PR into dev (build only, no deploy).
+  pull_request:
+    branches: [dev]
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
+# PR builds are grouped per-PR so they never cancel or queue behind a Pages
+# deployment; superseded PR runs are cancelled.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -30,16 +33,21 @@ jobs:
         run: uv sync --extra docs
 
       - name: Build docs
-        run: uv run mkdocs build
+        run: uv run zensical build --strict
 
       - name: Upload artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
           path: site/
 
   deploy:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

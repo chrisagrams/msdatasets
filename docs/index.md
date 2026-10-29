@@ -63,6 +63,18 @@ for path in ds:
 - [API Reference](api.md) — auto-generated reference for the public Python
   API.
 
+## For LLMs and coding agents
+
+These docs are also published as Markdown, which models read far more
+reliably than HTML:
+
+- [`llms.txt`](https://chrisagrams.github.io/msdatasets/llms.txt) — index of
+  every page, following the [llms.txt](https://llmstxt.org/) convention
+- [`llms-full.txt`](https://chrisagrams.github.io/msdatasets/llms-full.txt) —
+  the entire site concatenated into one file
+- Per-page Markdown — append `index.md` to any page URL, e.g.
+  [`getting-started/index.md`](https://chrisagrams.github.io/msdatasets/getting-started/index.md)
+
 ## License
 
 MIT.
