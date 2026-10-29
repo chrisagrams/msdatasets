@@ -1,6 +1,6 @@
 """A unified dataset framework for mass spectrometry."""
 
-__version__ = "0.1.3"  # x-release-please-version
+__version__ = "0.1.4"  # x-release-please-version
 
 from msdatasets.download import (
     download_dataset,
