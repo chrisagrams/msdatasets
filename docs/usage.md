@@ -105,8 +105,8 @@ from msdatasets import download_dataset
 
 ds = download_dataset(
     "550e8400-e29b-41d4-a716-446655440000",
-    filenames=["file1.mzML"],     # optional subset
-    store_as="mzml",              # mszx (default) | msz | mzml
+    filenames=["file1.mzML"],  # optional subset
+    store_as="mzml",  # mszx (default) | msz | mzml
     max_workers=8,
     force_download=False,
 )
@@ -128,7 +128,7 @@ this for repository accessions — `download_dataset` takes UUIDs only:
 from msdatasets import download_repo_dataset, RepoSource
 
 ds = download_repo_dataset(
-    RepoSource.PRIDE,          # or "pride" / "massive"
+    RepoSource.PRIDE,  # or "pride" / "massive"
     "PXD075509",
     filenames=["19HCD_3.mzML"],
     store_as="mszx",
@@ -145,9 +145,9 @@ from msdatasets import download_hf_dataset
 
 ds = download_hf_dataset(
     "myorg/proteomics-bench",
-    filenames=["run_01.mszx", "run_02.mszx"],   # optional subset
-    revision="v1.0",                              # branch / tag / commit
-    token=None,                                   # falls back to HF_TOKEN
+    filenames=["run_01.mszx", "run_02.mszx"],  # optional subset
+    revision="v1.0",  # branch / tag / commit
+    token=None,  # falls back to HF_TOKEN
 )
 print(ds.cache_dir, len(ds))
 ```
