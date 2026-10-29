@@ -90,9 +90,9 @@ from msdatasets import download_hf_dataset
 
 ds = download_hf_dataset(
     "myorg/proteomics-bench",
-    filenames=["run_01.mszx", "run_02.mszx"],   # optional subset
-    revision="v1.0",                              # optional branch/tag/commit
-    token=None,                                   # falls back to HF_TOKEN
+    filenames=["run_01.mszx", "run_02.mszx"],  # optional subset
+    revision="v1.0",  # optional branch/tag/commit
+    token=None,  # falls back to HF_TOKEN
 )
 print(ds.cache_dir, len(ds), "files")
 ```

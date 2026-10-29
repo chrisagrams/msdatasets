@@ -119,9 +119,11 @@ Or in Python, before importing the download functions:
 
 ```python
 import os
+
 os.environ["MS_API_URL"] = "http://localhost:8000"
 
 from msdatasets import download_dataset
+
 ...
 ```
 
