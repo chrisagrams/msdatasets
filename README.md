@@ -117,7 +117,7 @@ Full CLI reference, storage-format details, and Python API are in the
 ```bash
 git clone https://github.com/chrisagrams/msdatasets.git
 cd msdatasets
-uv sync --extra dev --extra docs
+uv sync --extra docs
 uv run pre-commit install
 uv run pytest
 ```
