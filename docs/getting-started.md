@@ -2,7 +2,8 @@
 
 ## Installation
 
-Install the base package from PyPI:
+msdatasets requires Python 3.11.5 or newer. Install the base package from
+PyPI:
 
 ```bash
 pip install msdatasets
@@ -89,20 +90,16 @@ dataset = load_dataset("pride/PXD075509[19HCD_3.mzML]")
 dataset = load_dataset("hf/myorg/proteomics-bench")
 ```
 
-Pass `load_annotations=[...]` to fetch PSMs alongside spectra. With it set,
-each `dataset[i]` yields `(mz, intensity, annotations_dict)` instead of
-`(mz, intensity)`:
+Pass `load_psms=True` to fetch PSMs alongside spectra. With it set, each
+`dataset[i]` yields `(mz, intensity, psms)` instead of `(mz, intensity)`,
+where `psms` is a list of PSM row dicts from the archive's stored mzTab
+tables:
 
 ```python
-from mscompress.types import AnnotationFormat
 from msdatasets import load_dataset
 
-dataset = load_dataset(
-    "hf/myorg/proteomics-bench",
-    load_annotations=[AnnotationFormat.PERCOLATOR_TSV],
-)
-mz, intensity, annotations = dataset[0]
-psms = annotations.get(AnnotationFormat.PERCOLATOR_TSV, [])
+dataset = load_dataset("hf/myorg/proteomics-bench", load_psms=True)
+mz, intensity, psms = dataset[0]  # psms: list[dict], one per PSM on that scan
 ```
 
 ## Pointing at a different server

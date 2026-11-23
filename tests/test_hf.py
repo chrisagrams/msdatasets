@@ -357,15 +357,16 @@ class TestLoadHfDataset:
             show_progress=False,
             output_dir=None,
         )
-        msc_cls.assert_called_once_with(tmp_path, load_annotations=None)
+        msc_cls.assert_called_once_with(
+            tmp_path, load_psms=False, cache_bytes=None, max_open_files=None
+        )
         assert result == "wrapped"
 
     @patch("msdatasets.hf.download_hf_dataset")
-    def test_forwards_load_annotations(self, mock_download, tmp_path):
+    def test_forwards_mscompress_options(self, mock_download, tmp_path):
         mock_ds = MagicMock()
         mock_ds.cache_dir = tmp_path
         mock_download.return_value = mock_ds
-        sentinel = ["pseudo-AnnotationFormat"]
 
         msc_cls = MagicMock(return_value="wrapped")
         fake_module = ModuleType("mscompress.datasets.torch")
@@ -373,7 +374,13 @@ class TestLoadHfDataset:
 
         with patch.dict(sys.modules, {"mscompress.datasets.torch": fake_module}):
             load_hf_dataset(
-                "alice/bench", show_progress=False, load_annotations=sentinel
+                "alice/bench",
+                show_progress=False,
+                load_psms=True,
+                cache_bytes=1024,
+                max_open_files=8,
             )
 
-        msc_cls.assert_called_once_with(tmp_path, load_annotations=sentinel)
+        msc_cls.assert_called_once_with(
+            tmp_path, load_psms=True, cache_bytes=1024, max_open_files=8
+        )

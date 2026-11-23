@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
-    from mscompress.types import AnnotationFormat
 
 from msdatasets.config import get_cache_dir
 from msdatasets.exceptions import DatasetNotFoundError, DownloadError
@@ -180,15 +179,19 @@ def load_hf_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     output_dir: Path | None = None,
-    load_annotations: list[AnnotationFormat] | None = None,
+    load_psms: bool = False,
+    cache_bytes: int | None = None,
+    max_open_files: int | None = None,
 ) -> MSCompressDataset:
     """Download an HF dataset repo and return an `MSCompressDataset`.
 
     Convenience wrapper around `download_hf_dataset`. Requires PyTorch.
 
-    *load_annotations* is forwarded to ``MSCompressDataset``.  When set, the
-    dataset's ``__getitem__`` returns ``(mz, intensity, annotations_dict)``
-    instead of just ``(mz, intensity)``.
+    *load_psms*, *cache_bytes*, and *max_open_files* are forwarded to
+    ``MSCompressDataset``.  With *load_psms* set, the dataset's
+    ``__getitem__`` returns ``(mz, intensity, psms)`` instead of just
+    ``(mz, intensity)``, where *psms* is a list of PSM row dicts read from
+    the mzTab tables stored in each ``.mszx`` archive.
     """
     from msdatasets.download import _import_torch_dataset
 
@@ -202,4 +205,9 @@ def load_hf_dataset(
         show_progress=show_progress,
         output_dir=output_dir,
     )
-    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
+    return dataset_cls(
+        ds.cache_dir,
+        load_psms=load_psms,
+        cache_bytes=cache_bytes,
+        max_open_files=max_open_files,
+    )

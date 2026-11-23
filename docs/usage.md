@@ -170,23 +170,21 @@ dataset = load_dataset("pride/PXD075509[19HCD_3.mzML]")
 dataset = load_dataset("hf/myorg/proteomics-bench")
 ```
 
-Pass `load_annotations=[...]` to fetch PSMs alongside spectra. Each
-`dataset[i]` then yields `(mz, intensity, annotations_dict)` instead of
-just `(mz, intensity)`. Available formats are
-`AnnotationFormat.PERCOLATOR_TSV`, `AnnotationFormat.PEPXML`, and
-`AnnotationFormat.TSV`:
+Pass `load_psms=True` to fetch PSMs alongside spectra. Each `dataset[i]`
+then yields `(mz, intensity, psms)` instead of just `(mz, intensity)`, where
+`psms` is a list of PSM row dicts read from the mzTab tables stored in each
+`.mszx` archive. Only `.mszx` files carry PSMs:
 
 ```python
-from mscompress.types import AnnotationFormat
 from msdatasets import load_dataset
 
-dataset = load_dataset(
-    "hf/myorg/proteomics-bench",
-    load_annotations=[AnnotationFormat.PERCOLATOR_TSV],
-)
-mz, intensity, annotations = dataset[0]
-psms = annotations.get(AnnotationFormat.PERCOLATOR_TSV, [])
+dataset = load_dataset("hf/myorg/proteomics-bench", load_psms=True)
+mz, intensity, psms = dataset[0]  # psms: list[dict], one per PSM on that scan
 ```
+
+`cache_bytes` sets the byte budget for `MSCompressDataset`'s
+decompressed-block cache, and `max_open_files` caps how many files it keeps
+open at once. Both default to the mscompress defaults.
 
 `load_dataset`, `load_repo_dataset`, and `load_hf_dataset` do not expose
 `store_as`; they download to the default cache as `.mszx` and hand the
