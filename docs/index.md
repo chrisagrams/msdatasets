@@ -21,7 +21,7 @@ loaded as a PyTorch `Dataset` for training pipelines.
 - **Filename filtering** with `accession[file1.raw,file2.mzML]` syntax.
 - **PyTorch integration** via the optional `torch` extra, returning an
   `mscompress.datasets.torch.MSCompressDataset`. Pass
-  `load_annotations=[...]` to fetch PSMs alongside spectra.
+  `load_psms=True` to fetch PSMs alongside spectra.
 
 ## Installation
 

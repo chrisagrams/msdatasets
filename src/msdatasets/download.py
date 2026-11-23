@@ -10,11 +10,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from mscompress.datasets.torch import MSCompressDataset
-    from mscompress.types import AnnotationFormat
 
 import httpx
-from mstransfer.client import download_batch, download_file
-from mstransfer.client.downloader import DownloadRequest
+from mstransfer.client import DownloadRequest, download_batch, download_file
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -33,6 +31,7 @@ from msdatasets.client import (
     trigger_repo_import,
 )
 from msdatasets.config import get_api_url, get_dataset_dir
+from msdatasets.exceptions import DownloadError
 from msdatasets.models import (
     Dataset,
     DatasetPart,
@@ -219,6 +218,11 @@ class _RichBatchProgress:
     def on_file_start(self, filename: str, total_bytes: int | None) -> None:
         self._tasks[filename] = self._progress.add_task(filename, total=total_bytes)
 
+    def on_file_total(self, filename: str, total_bytes: int | None) -> None:
+        # mstransfer learns the size from the GET response, after on_file_start.
+        if filename in self._tasks:
+            self._progress.update(self._tasks[filename], total=total_bytes)
+
     def on_file_progress(self, filename: str, bytes_delta: int) -> None:
         if filename in self._tasks:
             self._progress.update(self._tasks[filename], advance=bytes_delta)
@@ -341,13 +345,20 @@ def download_dataset(
 
         ctx = progress_bar if progress_bar is not None else _NullContext()
         with ctx:
-            downloaded = download_batch(
+            results = download_batch(
                 requests,
                 store_as=store_as,
                 parallel=max_workers,
                 progress=batch_progress,
             )
-            files.extend(downloaded)
+
+        failed = [r for r in results if r.error is not None]
+        if failed:
+            names = ", ".join(r.filename for r in failed)
+            raise DownloadError(
+                f"Failed to download {len(failed)} part(s): {names}"
+            ) from failed[0].error
+        files.extend(r.response.path for r in results if r.response is not None)
 
     # Ensure files are ordered by part_index.  `files` entries use the
     # target extension (set by mstransfer), so key the lookup by that name.
@@ -459,7 +470,9 @@ def load_repo_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
-    load_annotations: list[AnnotationFormat] | None = None,
+    load_psms: bool = False,
+    cache_bytes: int | None = None,
+    max_open_files: int | None = None,
 ) -> MSCompressDataset:
     """Trigger a repository import and return an `MSCompressDataset` once ready.
 
@@ -467,9 +480,11 @@ def load_repo_dataset(
     downloaded files into an `mscompress.datasets.torch.MSCompressDataset`.
     Requires PyTorch to be installed.
 
-    *load_annotations* is forwarded to ``MSCompressDataset``.  When set, the
-    dataset's ``__getitem__`` returns ``(mz, intensity, annotations_dict)``
-    instead of just ``(mz, intensity)``.
+    *load_psms*, *cache_bytes*, and *max_open_files* are forwarded to
+    ``MSCompressDataset``.  With *load_psms* set, the dataset's
+    ``__getitem__`` returns ``(mz, intensity, psms)`` instead of just
+    ``(mz, intensity)``, where *psms* is a list of PSM row dicts read from
+    the mzTab tables stored in each ``.mszx`` archive.
     """
     dataset_cls = _import_torch_dataset()
     ds = download_repo_dataset(
@@ -480,7 +495,12 @@ def load_repo_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
+    return dataset_cls(
+        ds.cache_dir,
+        load_psms=load_psms,
+        cache_bytes=cache_bytes,
+        max_open_files=max_open_files,
+    )
 
 
 def load_dataset(
@@ -489,7 +509,9 @@ def load_dataset(
     force_download: bool = False,
     show_progress: bool = True,
     max_workers: int = 4,
-    load_annotations: list[AnnotationFormat] | None = None,
+    load_psms: bool = False,
+    cache_bytes: int | None = None,
+    max_open_files: int | None = None,
 ) -> MSCompressDataset:
     """Download a dataset and return an `MSCompressDataset`.
 
@@ -518,11 +540,18 @@ def load_dataset(
         Show a ``rich`` progress bar during download.
     max_workers:
         Maximum number of parallel downloads.
-    load_annotations:
-        Annotation formats to load alongside spectra (forwarded to
+    load_psms:
+        Load PSMs alongside spectra (forwarded to
         ``mscompress.datasets.torch.MSCompressDataset``).  When set, the
-        returned dataset's ``__getitem__`` yields
-        ``(mz, intensity, annotations_dict)`` instead of ``(mz, intensity)``.
+        returned dataset's ``__getitem__`` yields ``(mz, intensity, psms)``
+        instead of ``(mz, intensity)``, where *psms* is a list of PSM row
+        dicts read from the mzTab tables stored in each ``.mszx`` archive.
+    cache_bytes:
+        Byte budget for ``MSCompressDataset``'s decompressed-block cache.
+        ``None`` uses the mscompress default.
+    max_open_files:
+        Maximum number of files ``MSCompressDataset`` keeps open at once.
+        ``None`` uses the mscompress default.
     """
     hf_spec = _parse_hf_spec(dataset_id)
     if hf_spec is not None:
@@ -534,7 +563,9 @@ def load_dataset(
             filenames=filenames,
             force_download=force_download,
             show_progress=show_progress,
-            load_annotations=load_annotations,
+            load_psms=load_psms,
+            cache_bytes=cache_bytes,
+            max_open_files=max_open_files,
         )
 
     repo_spec = _parse_repo_spec(dataset_id)
@@ -547,7 +578,9 @@ def load_dataset(
             force_download=force_download,
             show_progress=show_progress,
             max_workers=max_workers,
-            load_annotations=load_annotations,
+            load_psms=load_psms,
+            cache_bytes=cache_bytes,
+            max_open_files=max_open_files,
         )
 
     dataset_cls = _import_torch_dataset()
@@ -558,7 +591,12 @@ def load_dataset(
         show_progress=show_progress,
         max_workers=max_workers,
     )
-    return dataset_cls(ds.cache_dir, load_annotations=load_annotations)
+    return dataset_cls(
+        ds.cache_dir,
+        load_psms=load_psms,
+        cache_bytes=cache_bytes,
+        max_open_files=max_open_files,
+    )
 
 
 class _NullContext:

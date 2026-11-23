@@ -1,10 +1,12 @@
 """Tests for msdatasets.download and msdatasets.client."""
 
 import sys
+from pathlib import Path
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mstransfer.client import DownloadRequest, DownloadResult, FileResult
 
 from msdatasets.client import ensure_extracted, fetch_manifest
 from msdatasets.download import (
@@ -67,6 +69,21 @@ def _make_part(**overrides):
     }
     defaults.update(overrides)
     return DatasetPart(**defaults)
+
+
+def _ok(*paths: Path, skipped: bool = False) -> list[FileResult[DownloadResult]]:
+    """Successful `download_batch` results, one per output path."""
+    return [
+        FileResult(
+            filename=p.name,
+            response=DownloadResult(
+                request=DownloadRequest(url=f"https://x/{p.name}", dest=p),
+                path=p,
+                skipped=skipped,
+            ),
+        )
+        for p in paths
+    ]
 
 
 class TestManifest:
@@ -338,10 +355,10 @@ class TestDownloadDataset:
         manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
 
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / "sample_01.mszx",
             ds_dir / "sample_02.mszx",
-        ]
+        )
 
         ds = download_dataset("550e8400", show_progress=False)
 
@@ -375,7 +392,7 @@ class TestDownloadDataset:
         # Pre-create one file
         (ds_dir / "sample_01.mszx").write_bytes(b"existing")
 
-        mock_batch.return_value = [ds_dir / "sample_02.mszx"]
+        mock_batch.return_value = _ok(ds_dir / "sample_02.mszx")
 
         ds = download_dataset("550e8400", show_progress=False)
 
@@ -403,10 +420,10 @@ class TestDownloadDataset:
 
         (ds_dir / "sample_01.mszx").write_bytes(b"existing")
 
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / "sample_01.mszx",
             ds_dir / "sample_02.mszx",
-        ]
+        )
 
         ds = download_dataset("550e8400", force_download=True, show_progress=False)
 
@@ -450,10 +467,10 @@ class TestDownloadDataset:
         mock_dir.return_value = ds_dir
         manifest = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
         mock_fetch.return_value = manifest
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / "sample_01.mszx",
             ds_dir / "sample_02.mszx",
-        ]
+        )
 
         download_dataset("550e8400", show_progress=False)
 
@@ -466,6 +483,47 @@ class TestDownloadDataset:
         assert saved["total_parts"] == 2
         assert saved["parts"][0]["extract_url"] == "/datasets/550e8400/parts/aaa"
         assert saved["parts"][0]["download_url"] == "/transfer/files/aaa.mszx"
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_skipped_results_count_as_downloaded(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        mock_batch.return_value = _ok(
+            ds_dir / "sample_01.mszx", ds_dir / "sample_02.mszx", skipped=True
+        )
+
+        ds = download_dataset("550e8400", show_progress=False)
+
+        assert [f.name for f in ds.files] == ["sample_01.mszx", "sample_02.mszx"]
+
+    @patch("msdatasets.download.get_api_url", return_value="https://api.example.com")
+    @patch("msdatasets.download.get_dataset_dir")
+    @patch("msdatasets.download.fetch_manifest", new_callable=AsyncMock)
+    @patch("msdatasets.download.ensure_all_extracted", new_callable=AsyncMock)
+    @patch("msdatasets.download.download_batch")
+    def test_failed_part_raises_download_error(
+        self, mock_batch, mock_ensure, mock_fetch, mock_dir, mock_api_url, tmp_path
+    ):
+        ds_dir = tmp_path / "ds"
+        mock_dir.return_value = ds_dir
+        mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
+        cause = RuntimeError("connection reset")
+        mock_batch.return_value = [
+            *_ok(ds_dir / "sample_01.mszx"),
+            FileResult(filename="sample_02.mszx", error=cause),
+        ]
+
+        with pytest.raises(DownloadError, match=r"1 part\(s\): sample_02\.mszx") as exc:
+            download_dataset("550e8400", show_progress=False)
+
+        assert exc.value.__cause__ is cause
 
 
 class TestDownloadStoreAs:
@@ -496,10 +554,10 @@ class TestDownloadStoreAs:
         mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
 
         # Emulate mstransfer's auto-extension rewrite.
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / f"sample_01{ext}",
             ds_dir / f"sample_02{ext}",
-        ]
+        )
 
         ds = download_dataset("550e8400", store_as=store_as, show_progress=False)
 
@@ -553,10 +611,10 @@ class TestDownloadStoreAs:
         (ds_dir / "sample_01.mszx").write_bytes(b"stale")
         (ds_dir / "sample_02.mszx").write_bytes(b"stale")
 
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / "sample_01.mzML",
             ds_dir / "sample_02.mzML",
-        ]
+        )
 
         download_dataset("550e8400", store_as="mzml", show_progress=False)
 
@@ -578,10 +636,10 @@ class TestDownloadOutputDir:
     ):
         target = tmp_path / "one-off"
         mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             target / "sample_01.mszx",
             target / "sample_02.mszx",
-        ]
+        )
 
         ds = download_dataset("550e8400", output_dir=target, show_progress=False)
 
@@ -607,10 +665,10 @@ class TestDownloadOutputDir:
         ds_dir = tmp_path / "ds"
         mock_dir.return_value = ds_dir
         mock_fetch.return_value = Manifest.model_validate(SAMPLE_MANIFEST_DICT)
-        mock_batch.return_value = [
+        mock_batch.return_value = _ok(
             ds_dir / "sample_01.mszx",
             ds_dir / "sample_02.mszx",
-        ]
+        )
 
         ds = download_dataset("550e8400", show_progress=False)
 
@@ -643,7 +701,9 @@ class TestLoadDataset:
             show_progress=False,
             max_workers=4,
         )
-        mock_msc_cls.assert_called_once_with("/tmp/ds", load_annotations=None)
+        mock_msc_cls.assert_called_once_with(
+            "/tmp/ds", load_psms=False, cache_bytes=None, max_open_files=None
+        )
         assert result is sentinel
 
 
@@ -710,6 +770,23 @@ class TestRichBatchProgress:
         progress.update.assert_called_with(
             "task-id-1", description="[red]a.raw (error)"
         )
+
+    def test_total_arrives_after_start(self):
+        # mstransfer starts a file with no size, then reports it from the GET.
+        progress = MagicMock()
+        progress.add_task.return_value = "task-id-1"
+        adapter = _RichBatchProgress(progress)
+
+        adapter.on_file_start("a.raw", None)
+        progress.add_task.assert_called_once_with("a.raw", total=None)
+        adapter.on_file_total("a.raw", 1234)
+        progress.update.assert_called_once_with("task-id-1", total=1234)
+
+    def test_total_for_unknown_file_is_noop(self):
+        progress = MagicMock()
+        adapter = _RichBatchProgress(progress)
+        adapter.on_file_total("unknown.raw", 100)
+        progress.update.assert_not_called()
 
     def test_error_for_unknown_file_is_noop(self):
         progress = MagicMock()
@@ -973,7 +1050,9 @@ class TestLoadDatasetRouting:
         mock_import.return_value = cls
         result = load_dataset("550e8400-e29b-41d4-a716-446655440000")
         mock_download.assert_called_once()
-        cls.assert_called_once_with(tmp_path, load_annotations=None)
+        cls.assert_called_once_with(
+            tmp_path, load_psms=False, cache_bytes=None, max_open_files=None
+        )
         assert result == "wrapped"
 
     @patch("msdatasets.download._import_torch_dataset")
@@ -1002,13 +1081,19 @@ class TestLoadDatasetRouting:
             filenames=["a.mszx", "b.mszx"],
             force_download=False,
             show_progress=True,
-            load_annotations=None,
+            load_psms=False,
+            cache_bytes=None,
+            max_open_files=None,
         )
         assert result == "wrapped"
 
     @patch("msdatasets.hf.load_hf_dataset")
-    def test_hf_spec_forwards_load_annotations(self, mock_load_hf):
+    def test_hf_spec_forwards_mscompress_options(self, mock_load_hf):
         mock_load_hf.return_value = "wrapped"
-        sentinel = ["pseudo-AnnotationFormat"]
-        load_dataset("hf/alice/bench", load_annotations=sentinel)
-        assert mock_load_hf.call_args.kwargs["load_annotations"] is sentinel
+        load_dataset(
+            "hf/alice/bench", load_psms=True, cache_bytes=1024, max_open_files=8
+        )
+        kwargs = mock_load_hf.call_args.kwargs
+        assert kwargs["load_psms"] is True
+        assert kwargs["cache_bytes"] == 1024
+        assert kwargs["max_open_files"] == 8

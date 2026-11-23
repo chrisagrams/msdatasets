@@ -123,7 +123,7 @@ uv run pytest
 ```
 
 Pre-commit runs `ruff`, `mypy`, and `pytest` (90% coverage gate). CI runs on
-Python 3.10, 3.11, and 3.12.
+Python 3.11 and 3.12.
 
 ## License
 
